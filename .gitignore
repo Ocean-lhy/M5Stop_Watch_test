@@ -1,0 +1,9 @@
+build/
+.vscode/
+.cache/
+.DS_Store
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+*.bin
