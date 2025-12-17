@@ -5,17 +5,25 @@
 #include "es8311_user.h"
 #include "cst820_user.h"
 #include "nvs_flash.h"
+#include "display_user.h"
+#include "imu_user.h"
 static const char *TAG = "main";
 
 extern "C" void app_main(void)
 {
     vTaskDelay(3000 / portTICK_PERIOD_MS);
     ESP_LOGI(TAG, "Hello World! This is M5STACK Stop Watch.");
+    gpio_deep_sleep_hold_dis();
 
     //I2C TEST
     ESP_LOGI(TAG, "I2C -> register");
     register_i2c_bus_device();
     ESP_LOGI(TAG, "I2C -> register -> END.");
+
+    // sleep about 
+#if 0
+    stop_watch_power_mode_L2();
+#endif
 
     ESP_LOGI(TAG, "PMIC / PY32 IO EXPANDER -> START");
     pmic_init();
@@ -24,6 +32,14 @@ extern "C" void app_main(void)
 
     // scan I2C after L3B enable
     scan_i2c_bus_device();
+
+// RX8130 TEST, it will use pm1 shutdown or esp32s3 sleep, so that code will end in this void
+#if 0
+    wakeup_test(WakeupDevice::RTC_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+    // wakeup_test(WakeupDevice::RTC_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
+    // wakeup_test(WakeupDevice::IMU_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+    // wakeup_test(WakeupDevice::IMU_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
+#endif
 
 #if 1
     ESP_LOGI(TAG, "M5GFX SHOW -> START");
@@ -47,17 +63,10 @@ extern "C" void app_main(void)
     // BMI270 TEST
 #if 1
     ESP_LOGI(TAG, "BMI270 -> show accel, gyro, mag 10s,and sleep");
-    bmi270_test();
+    bmi270_test(g_i2c_bus);
     ESP_LOGI(TAG, "BMI270 -> END.");
 #endif
 
-    // RX8130 TEST, it will use pm1 shutdown or esp32s3 sleep, so that code will end in this void
-#if 0
-    ESP_LOGI(TAG, "RX8130 -> show time, set time,30s timer up");
-    rx8130_recovery();
-    rx8130_wakeup_test();
-    ESP_LOGI(TAG, "RX8130 -> END.");
-#endif
 
     while (1)
     {

@@ -71,9 +71,9 @@ void py32_io_expander_init()
 {
     py32_device_handle = i2c_bus_device_create(g_i2c_bus, PY32_IO_EXPANDER_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
     io_expander = m5_io_py32ioexpander(g_i2c_bus, py32_device_handle);
-    uint8_t hw_version, fw_version;
-    io_expander.readVersion(&hw_version, &fw_version);
-    ESP_LOGI(TAG, "PY32 IO Expander-> HW Version: %d, FW Version: %d", hw_version, fw_version);
+    uint8_t fw_version;
+    io_expander.readVersion(&fw_version);
+    ESP_LOGI(TAG, "PY32 IO Expander-> FW Version: %d", fw_version);
     uint16_t uid;
     io_expander.readDeviceUID(&uid);
     ESP_LOGI(TAG, "PY32 IO Expander-> UID: 0x%04X", uid);
@@ -132,6 +132,11 @@ void stop_watch_power_mode_L1()
 // deepsleep mode, put all devices into sleep mode on the basis of L3A
 void stop_watch_power_mode_L2()
 {
+    pm1_device_handle = i2c_bus_device_create(g_i2c_bus, PMIC_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
+    pmic.pm1_init(g_i2c_bus, &pm1_device_handle, 100000);
+    pm1_btn_set_cfg(PM1_ADDR_BTN_TYPE_CLICK, PM1_ADDR_BTN_CLICK_DELAY_1000MS);  // 单击延迟1秒
+    pm1_wdt_set(PM1_WDT_CTRL_DISABLE, 0);  // 禁用WDT
+
     pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, 0, NULL);   // disable charge
     pm1_pwr_set_cfg(PM1_PWR_CFG_5V_INOUT, 0, NULL);
     pm1_pwr_set_cfg(PM1_PWR_CFG_LED_CONTROL, 0, NULL); // disable LED
@@ -150,6 +155,7 @@ void stop_watch_power_mode_L2()
     }
     uint8_t reg_data = 0x01;
     i2c_bus_write_byte(i2c_dev_handle_bmi270, 0x7C, reg_data);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
     reg_data = 0x00;
     i2c_bus_write_byte(i2c_dev_handle_bmi270, 0x7D, reg_data);
 
@@ -164,19 +170,19 @@ void stop_watch_power_mode_L2()
     i2c_bus_write_byte(cst820_dev, 0xE5, i2c_buf);
 
     // py32 sleep
-    io_expander.setI2cConfig(1, true, true, true);
+    py32_device_handle = i2c_bus_device_create(g_i2c_bus, PY32_IO_EXPANDER_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
+    io_expander = m5_io_py32ioexpander(g_i2c_bus, py32_device_handle);
+    io_expander.init( PY32_IO_EXPANDER_ADDR );
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    io_expander.setI2cConfig(3, true, true, true);
 
     // pmic sleep
     pm1_set_i2c_sleep_time(3);
 
     rtc_gpio_isolate((gpio_num_t)GPIO_NUM_1);   // KEY1
     rtc_gpio_isolate((gpio_num_t)GPIO_NUM_2);   // KEY2
-    rtc_gpio_isolate((gpio_num_t)GPIO_NUM_14);  // TP_RST
     rtc_gpio_isolate((gpio_num_t)GPIO_NUM_13);  // TP_INT
-    rtc_gpio_isolate((gpio_num_t)GPIO_NUM_12);  // IMU_INT
-
-    gpio_reset_pin((gpio_num_t)GPIO_NUM_39);  // OLED_CS
-    gpio_set_direction((gpio_num_t)GPIO_NUM_39, GPIO_MODE_INPUT);
+    rtc_gpio_isolate((gpio_num_t)GPIO_NUM_12);  // PY_INT
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     gpio_deep_sleep_hold_en();

@@ -1,3 +1,9 @@
 [submodule "components/M5GFX"]
 	path = components/M5GFX
 	url = https://github.com/m5stack/M5GFX.git
+[submodule "components/m5_io_expander"]
+	path = components/m5_io_expander
+	url = git@gitlab.m5stack.com:embedded-common-components/m5_io_expander.git
+[submodule "components/m5_stamp_pm1"]
+	path = components/m5_stamp_pm1
+	url = git@gitlab.m5stack.com:moyongming/m5_stamp_pm1.git
