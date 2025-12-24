@@ -19,8 +19,8 @@ public:
     {
         _cfg.memory_width = _cfg.panel_width = 480;
         _cfg.memory_height = _cfg.panel_height = 480;
-        _write_depth                           = lgfx::color_depth_t::rgb565_2Byte;
-        _read_depth                            = lgfx::color_depth_t::rgb565_2Byte;
+        _write_depth                           = lgfx::color_depth_t::rgb888_3Byte;
+        _read_depth                            = lgfx::color_depth_t::rgb888_3Byte;
     }
 
     const uint8_t* getInitCommands(uint8_t listno) const override
