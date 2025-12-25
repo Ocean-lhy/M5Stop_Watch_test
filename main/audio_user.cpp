@@ -1,4 +1,4 @@
-#include "es8311_user.h"
+#include "audio_user.h"
 
 #include "esp_idf_version.h"
 #include "esp_log.h"
@@ -18,7 +18,7 @@ extern "C" const uint8_t _binary_demo_pcm_end[] asm("_binary_demo_pcm_end");
 static i2c_master_bus_handle_t es_i2c_bus_handle;
 #define I2S_MAX_KEEP SOC_I2S_NUM
 
-static const char *TAG = "ES8311_USER";
+static const char *TAG = "audio_user";
 
 typedef struct {
     i2s_chan_handle_t tx_handle;
@@ -238,13 +238,13 @@ void es8311_init()
     ret = esp_codec_dev_open(codec_dev, &fs);
     // TEST_ESP_OK(ret);
 
-    io_expander.digitalWrite(PY32_SPK_EN_PIN, 1);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    stop_watch_speaker_set(true);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
 
     play_demo_file(codec_dev);
 
-    io_expander.digitalWrite(PY32_SPK_EN_PIN, 0);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    stop_watch_speaker_set(false);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
     
     while (true)
     {
@@ -264,16 +264,16 @@ void es8311_init()
             ESP_LOGE(TAG, "Record failed: %d", ret);
             break;
         }
-        io_expander.digitalWrite(PY32_SPK_EN_PIN, 1);
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        stop_watch_speaker_set(true);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
         ESP_LOGI(TAG, "Record completed, start playing...");
         ret = esp_codec_dev_write(codec_dev, data, buffer_size);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Playback failed: %d", ret);
         }
         ESP_LOGI(TAG, "Playback completed");
-        io_expander.digitalWrite(PY32_SPK_EN_PIN, 0);
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        stop_watch_speaker_set(false);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
         
         free(data);
         break;

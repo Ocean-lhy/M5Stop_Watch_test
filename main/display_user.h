@@ -140,5 +140,7 @@ public:
     }
 };
 
+extern M5StopWatch gfx;
+
 void display_init();
 void display_gfx_loop();

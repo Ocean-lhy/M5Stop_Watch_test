@@ -1,5 +1,5 @@
-#ifndef ES8311_USER_H
-#define ES8311_USER_H
+#ifndef AUDIO_USER_H
+#define AUDIO_USER_H
 
 #include "driver/i2s_std.h"
 // #include "driver/i2s_tdm.h"
@@ -24,4 +24,4 @@
 
 extern void es8311_init();
 
-#endif // ES8311_USER_H
+#endif // AUDIO_USER_H

@@ -14,6 +14,10 @@ i2c_bus_device_handle_t pm1_device_handle = NULL;
 
 void pmic_init()
 {
+    if (pm1_device_handle != NULL)
+    {
+        return;
+    }
     pm1_device_handle = i2c_bus_device_create(g_i2c_bus, PMIC_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
     pmic.pm1_init(g_i2c_bus, &pm1_device_handle, 100000);
 
@@ -34,17 +38,17 @@ void pmic_init()
     pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, PM1_PWR_CFG_CHG_EN, NULL);
     // pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, 0, NULL); 
 
-    // quick charge, 714mA in theory
-    pm1_gpio_set(PM1_GPIO_NUM_3, PM1_GPIO_MODE_INPUT, PM1_GPIO_INPUT_NC, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_OPEN_DRAIN);
-    // normal charge, 191mA in theory
-    // pm1_gpio_set(PM1_GPIO_NUM_3, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_HIGH, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_PUSH_PULL); 
+    // quick charge
+    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_LOW, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_PUSH_PULL); 
+    // normal charge
+    // pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_HIGH, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_PUSH_PULL); 
 
     // set charge detect pin to input
-    pm1_gpio_set_mode(PM1_GPIO_NUM_1, PM1_GPIO_MODE_INPUT);
+    pm1_gpio_set_mode(PMG2_CHG_STAT, PM1_GPIO_MODE_INPUT);
 
     // get charge state
     pm1_gpio_in_state_t gpio_state;
-    pm1_gpio_get_in_state(PM1_GPIO_NUM_1, &gpio_state);
+    pm1_gpio_get_in_state(PMG2_CHG_STAT, &gpio_state);
 
     // get reference voltage
     uint16_t reference_voltage;
@@ -69,19 +73,22 @@ i2c_bus_device_handle_t py32_device_handle = NULL;
 
 void py32_io_expander_init()
 {
-    py32_device_handle = i2c_bus_device_create(g_i2c_bus, PY32_IO_EXPANDER_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
-    io_expander = m5_io_py32ioexpander(g_i2c_bus, py32_device_handle);
-    uint8_t fw_version;
-    io_expander.readVersion(&fw_version);
-    ESP_LOGI(TAG, "PY32 IO Expander-> FW Version: %d", fw_version);
-    uint16_t uid;
-    io_expander.readDeviceUID(&uid);
-    ESP_LOGI(TAG, "PY32 IO Expander-> UID: 0x%04X", uid);
-
-    io_expander.init( PY32_IO_EXPANDER_ADDR );
+    if (py32_device_handle == NULL)
+    {
+        py32_device_handle = i2c_bus_device_create(g_i2c_bus, PY32_IO_EXPANDER_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
+        io_expander = m5_io_py32ioexpander(g_i2c_bus, py32_device_handle);
+        uint8_t fw_version;
+        io_expander.readVersion(&fw_version);
+        ESP_LOGI(TAG, "PY32 IO Expander-> FW Version: %d", fw_version);
+        uint16_t uid;
+        io_expander.readDeviceUID(&uid);
+        ESP_LOGI(TAG, "PY32 IO Expander-> UID: 0x%04X", uid);
+        io_expander.init( PY32_IO_EXPANDER_ADDR );
+    }
 
     // sleep close, 400KHz, wake mode, inter pull off
     io_expander.setI2cConfig(0, true, true, true); 
+    vTaskDelay(100 / portTICK_PERIOD_MS);
 
     uint16_t ref_voltage;
     io_expander.getRefVoltage(&ref_voltage);
@@ -93,23 +100,28 @@ void py32_io_expander_init()
 
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
-    io_expander.pinMode(PY32_AU_EN_PIN, OUTPUT);
-    io_expander.pinMode(PY32_L3B_EN_PIN, OUTPUT);
     io_expander.pinMode(PY32_MOTOR_EN_PIN, OUTPUT);
-    io_expander.pinMode(PY32_SPK_EN_PIN, OUTPUT);
-    io_expander.pinMode(PY32_MUX_CTR_PIN, OUTPUT);
+    io_expander.pinMode(PY32_L3B_EN_PIN, OUTPUT);
+    io_expander.pinMode(PY32_SPK_PA_PIN, OUTPUT);
+    io_expander.pinMode(PY32_TP_RST_PIN, OUTPUT);
     io_expander.pinMode(PY32_OLED_RST_PIN, OUTPUT);
+    io_expander.pinMode(PY32_MUX_CTR_PIN, OUTPUT);
+    io_expander.pinMode(PY32_AU_EN_PIN, OUTPUT);
 
-    io_expander.digitalWrite(PY32_AU_EN_PIN, 1);
     io_expander.digitalWrite(PY32_L3B_EN_PIN, 1);
-    io_expander.digitalWrite(PY32_SPK_EN_PIN, 1);
-    io_expander.digitalWrite(PY32_MUX_CTR_PIN, 0);
+    io_expander.digitalWrite(PY32_TP_RST_PIN, 1);
+    io_expander.digitalWrite(PY32_SPK_PA_PIN, 0);
     io_expander.digitalWrite(PY32_OLED_RST_PIN, 1);
+    io_expander.digitalWrite(PY32_MUX_CTR_PIN, 0);
+    io_expander.digitalWrite(PY32_AU_EN_PIN, 1);
 
     io_expander.setPwmFrequency(5000);
     io_expander.setPwmDuty(0, 50, false, true);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     io_expander.setPwmDuty(0, 0, false, true);
+
+    gpio_set_direction(SPK_PA_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(SPK_PA_PIN, 0);
 }
 
 // power management
@@ -132,8 +144,11 @@ void stop_watch_power_mode_L1()
 // deepsleep mode, put all devices into sleep mode on the basis of L3A
 void stop_watch_power_mode_L2()
 {
-    pm1_device_handle = i2c_bus_device_create(g_i2c_bus, PMIC_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
-    pmic.pm1_init(g_i2c_bus, &pm1_device_handle, 100000);
+    if (pm1_device_handle == NULL)
+    {
+        pm1_device_handle = i2c_bus_device_create(g_i2c_bus, PMIC_ADDR, 100000); // default 100KHz, if you want to use 400KHz, you need to configure
+        pmic.pm1_init(g_i2c_bus, &pm1_device_handle, 100000);
+    }
     pm1_btn_set_cfg(PM1_ADDR_BTN_TYPE_CLICK, PM1_ADDR_BTN_CLICK_DELAY_1000MS);  // 单击延迟1秒
     pm1_wdt_set(PM1_WDT_CTRL_DISABLE, 0);  // 禁用WDT
 
@@ -199,4 +214,20 @@ void stop_watch_power_mode_L3A()
 void stop_watch_power_mode_L3B()
 {
     io_expander.digitalWrite(PY32_L3B_EN_PIN, 1);
+}
+
+void stop_watch_speaker_set(bool enable)
+{
+    if (enable)
+    {
+        io_expander.digitalWrite(PY32_SPK_PA_PIN, 1);
+        gpio_set_level(SPK_PA_PIN, 1);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+    else
+    {
+        io_expander.digitalWrite(PY32_SPK_PA_PIN, 0);
+        gpio_set_level(SPK_PA_PIN, 0);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
 }

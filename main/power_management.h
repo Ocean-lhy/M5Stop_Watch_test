@@ -34,6 +34,8 @@ void stop_watch_power_mode_L2();
 void stop_watch_power_mode_L3A();
 void stop_watch_power_mode_L3B();
 
+void stop_watch_speaker_set(bool enable);
+
 void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode);
 
 #endif // POWER_MANAGEMENT_H

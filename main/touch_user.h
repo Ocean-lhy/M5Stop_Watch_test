@@ -1,5 +1,5 @@
-#ifndef CST820_DRIVER_H
-#define CST820_DRIVER_H
+#ifndef TOUCH_USER_H
+#define TOUCH_USER_H
 
 #include <stdint.h>
 #include <string.h>

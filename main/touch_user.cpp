@@ -1,12 +1,13 @@
-#include "cst820_user.h"
+#include "touch_user.h"
 #include <stdint.h>
 #include <string.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "power_management.h"
 
-static const char *TAG = "cst820_user";
+static const char *TAG = "touch_user";
 static i2c_bus_device_handle_t cst820_dev = NULL;
 static uint8_t chip_id;
 static uint8_t soft_ver;
@@ -23,11 +24,11 @@ esp_err_t cst820_tp_reset(void)
 {
     ESP_LOGI(TAG, "Reset touch");
 
-    gpio_set_level(TOUCH_RST_PIN, 0);
+    io_expander.digitalWrite(PY32_TP_RST_PIN, 0);
 
     vTaskDelay(pdMS_TO_TICKS(10));  // Delay 10ms
 
-    gpio_set_level(TOUCH_RST_PIN, 1);
+    io_expander.digitalWrite(PY32_TP_RST_PIN, 1);
 
     vTaskDelay(pdMS_TO_TICKS(50));  // Delay 50ms wait for reset complete
 

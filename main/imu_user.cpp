@@ -25,7 +25,7 @@ void bmi270_test(i2c_bus_handle_t i2c_bus)
     ESP_LOGI(TAG, "BMI270 init");
     bmi270_tools bmi270_sensor;
     i2c_bus_device_handle_t bmi270_device_handle = i2c_bus_device_create(i2c_bus, I2C_BMI270_ADDR, 100000);
-    esp_err_t ret = bmi270_sensor.init(i2c_bus, &bmi270_device_handle, true, bmi270_tools::MODE_CONTEXT); // 启用磁力计
+    esp_err_t ret = bmi270_sensor.init(i2c_bus, &bmi270_device_handle, true, bmi270_tools::MODE_CONTEXT);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BMI270初始化失败: %s", esp_err_to_name(ret));
     } else {
@@ -39,16 +39,6 @@ void bmi270_test(i2c_bus_handle_t i2c_bus)
         }
     }
 
-    // 校准所有传感器（包括磁力计）
-    ESP_LOGI(TAG, "请按照8字形旋转设备...");
-    ret = bmi270_sensor.calibrate_sensors(10000, 200);  // 10秒，200个样本
-    
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "校准成功！");
-    } else {
-        ESP_LOGE(TAG, "校准失败");
-    }
-
     uint8_t ct = 10;
     while(ct--)
     {
@@ -57,14 +47,6 @@ void bmi270_test(i2c_bus_handle_t i2c_bus)
         if (ret == ESP_OK)
         {
             ESP_LOGI(TAG, "BMI270数据获取成功-----------------");
-            if (bmi270_data.mag_valid)
-            {
-                ESP_LOGI(TAG, "磁力计: %d, %d, %d", bmi270_data.mag_x, bmi270_data.mag_y, bmi270_data.mag_z);
-            }
-            else
-            {
-                ESP_LOGI(TAG, "BMI270磁力计数据无效");
-            }
             if (bmi270_data.acc_valid)
             {
                 ESP_LOGI(TAG, "加速度计: %.3f, %.3f, %.3f", bmi270_data.acc_x, bmi270_data.acc_y, bmi270_data.acc_z);
