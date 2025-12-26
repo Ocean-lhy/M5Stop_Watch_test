@@ -68,7 +68,9 @@ static uint8_t dec2bcd(uint8_t val)
 
 bool RX8130_Class::begin(i2c_bus_handle_t busHandle, uint8_t addr)
 {
-    _i2c_device_handle = i2c_bus_device_create(busHandle, addr, 100000);
+    if (_i2c_device_handle == NULL) {
+        _i2c_device_handle = i2c_bus_device_create(busHandle, addr, 100000);
+    }
 
     if (_i2c_device_handle == NULL) {
         ESP_LOGE("rx8130", "RX8130_Class::begin failed");

@@ -1,0 +1,1663 @@
+#include "ui.h"
+
+#include <math.h>
+
+#include <vector>
+
+#include "bmi270_tools.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+
+#include "wifi_manager.h"
+#include "lwip/sockets.h"
+#include <arpa/inet.h>
+
+#include "circle_images.h"
+
+static const char *TAG = "UI";
+StopWatchApp app;
+
+// WiFi 联网配置
+#define WIFI_SSID "M5Stack"
+#define WIFI_PASS "m5office888"
+// WiFi 拉距测试配置
+#define WIFI_TEST_SSID  "M5-WiFi-Test"
+#define WIFI_TEST_PASS  "M5NETWORKTEST"
+#define UDP_TARGET_IP   "192.168.3.5"
+#define UDP_TARGET_PORT 12345
+
+#define CYLINDER_POINTS 16  // 圆周采样点数
+
+struct Point3D {
+    float x, y, z;
+};
+struct Point2D {
+    float x, y;
+};
+
+Point3D stopwatch_vertices[CYLINDER_POINTS * 2];
+
+void init_stopwatch_geometry()
+{
+    float radius      = 1.0f;
+    float half_height = 0.26f;
+
+    for (int i = 0; i < CYLINDER_POINTS; i++) {
+        float angle = i * 2.0f * 3.1415926f / CYLINDER_POINTS;
+        float x     = -sin(angle) * radius;
+        float y     = cos(angle) * radius;
+
+        // 顶面
+        stopwatch_vertices[i] = {x, y, -half_height};
+        // 底面
+        stopwatch_vertices[i + CYLINDER_POINTS] = {x, y, half_height};
+    }
+}
+
+// 测试列表定义
+std::vector<TestItem> testList = {
+    {"1. 设置I2C速率", StopWatchApp::test_i2c_rate},
+    {"2. 设置Grove 5V", StopWatchApp::test_grove_5v},
+    {"3. 设置充电", StopWatchApp::test_charge_switch},
+    {"4. 状态信息", StopWatchApp::test_status_show},
+    {"5. 显示测试", StopWatchApp::test_display_color},
+    {"6. 触摸测试", StopWatchApp::test_touch_draw},
+    {"7. 录音测试", StopWatchApp::test_audio_record},
+    {"8. 播放测试", StopWatchApp::test_audio_play},
+    {"9. IMU测试", StopWatchApp::test_imu_data},
+    {"10. RTC时间", StopWatchApp::test_rtc_show},
+    {"11. 振动测试", StopWatchApp::test_vibration},
+    {"12. Grove IO测试", StopWatchApp::test_grove_io},
+    {"13. 底部IO测试", StopWatchApp::test_bottom_io},
+    {"14. CH442E 设置", StopWatchApp::test_ch442e},
+    {"15. WiFi 扫描", StopWatchApp::test_wifi_scan},
+    {"16. WiFi 拉距", StopWatchApp::test_wifi_distance},
+    {"17. L0 关机", StopWatchApp::test_l0_mode},
+    {"18. L1 待机", StopWatchApp::test_l1_mode},
+    {"19. L2 睡眠", StopWatchApp::test_l2_mode},
+    {"20. IMU 唤醒 L2", StopWatchApp::test_imu_wake},
+    {"21. IMU 唤醒 L1", StopWatchApp::test_imu_shutdown_wake},
+    {"22. RTC 唤醒 L2", StopWatchApp::test_rtc_wake},
+    {"23. RTC 唤醒 L1", StopWatchApp::test_rtc_shutdown_wake},
+    {"24. 底座插入唤醒", StopWatchApp::test_base_wake},
+    {"25. 满载测试", StopWatchApp::test_full_load},
+    {"26. 老化测试", StopWatchApp::test_aging},
+};
+
+void StopWatchApp::init()
+{
+    gpio_reset_pin(USER_BUTTON1_PIN);
+    gpio_set_direction(USER_BUTTON1_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(USER_BUTTON1_PIN, GPIO_PULLUP_ONLY);
+
+    gpio_reset_pin(USER_BUTTON2_PIN);
+    gpio_set_direction(USER_BUTTON2_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(USER_BUTTON2_PIN, GPIO_PULLUP_ONLY);
+}
+
+unsigned long getMillis()
+{
+    return (unsigned long)(esp_timer_get_time() / 1000);
+}
+void StopWatchApp::updateInputs(bool updateTouch)
+{
+    unsigned long now = getMillis();
+
+    // 1. 处理左键 (Button2)
+    int stateL             = gpio_get_level(USER_BUTTON2_PIN);
+    _inputs.btnLeftClicked = false;
+    if (_trackL.lastState == 1 && stateL == 0) {  // 下降沿
+        _inputs.btnLeftClicked  = true;
+        _trackL.lastTriggerTime = now;
+    } else if (stateL == 0 && (now - _trackL.lastTriggerTime >= 400)) {  // 长按自增
+        _inputs.btnLeftClicked  = true;
+        _trackL.lastTriggerTime = now;
+    }
+    _trackL.lastState = stateL;
+
+    // 2. 处理右键 (Button1)
+    int stateR              = gpio_get_level(USER_BUTTON1_PIN);
+    _inputs.btnRightClicked = false;
+    if (_trackR.lastState == 1 && stateR == 0) {
+        _inputs.btnRightClicked = true;
+        _trackR.lastTriggerTime = now;
+    } else if (stateR == 0 && (now - _trackR.lastTriggerTime >= 500)) {
+        _inputs.btnRightClicked = true;
+        _trackR.lastTriggerTime = now;
+    }
+    _trackR.lastState = stateR;
+
+    // 3. 处理触摸 (抬起触发模式)
+    if (updateTouch) {
+        cst820_loop();
+        bool currentDown     = (cst820_status == 0 || cst820_status == 2) && (cst820_x > 0 || cst820_y > 0);
+        _inputs.touchClicked = false;
+        if (currentDown) {
+            _isTouching    = true;
+            _inputs.touchX = cst820_x;
+            _inputs.touchY = cst820_y;
+        } else {
+            if (_isTouching) {  // 松开
+                _inputs.touchClicked = true;
+                // X, Y 保持最后一次有效触点的位置供后续区域判断
+                _isTouching = false;
+            }
+        }
+    }
+}
+
+// 区域判断函数
+bool StopWatchApp::checkTouchRegion(int x1, int y1, int x2, int y2)
+{
+    return _inputs.touchClicked && _inputs.touchX >= x1 && _inputs.touchX <= x2 && _inputs.touchY >= y1 &&
+           _inputs.touchY <= y2;
+}
+
+void StopWatchApp::loop()
+{
+    // 1. 处理输入
+    updateInputs(true);
+    // 向上：点击屏幕上半部分
+    if (checkTouchRegion(0, 50, 466, 180)) {
+        menu_index--;
+        if (menu_index < 0) {
+            menu_index    = testList.size() - 1;
+            scroll_offset = menu_index + 1;  // 跨度平滑处理
+        }
+    }
+    // 向下：左键 或 点击下半部分
+    if (_inputs.btnLeftClicked || checkTouchRegion(0, 280, 466, 410)) {
+        menu_index++;
+        if (menu_index >= testList.size()) {
+            menu_index    = 0;
+            scroll_offset = -1;  // 跨度平滑处理
+        }
+    }
+
+    // 2. 核心动画：平滑追踪
+    // 每一帧 scroll_offset 都会向 menu_index 靠近
+    scroll_offset += (menu_index - scroll_offset) * spring_k;
+
+    // 3. 渲染
+    canvas.fillScreen(TFT_BLACK);
+    drawHeader();
+    drawFooter();
+    drawMenu();  // 内部使用 scroll_offset
+
+    // 点击中间或者右键进入测试
+    if (_inputs.btnRightClicked || checkTouchRegion(0, 181, 466, 279)) {
+        if (testList[menu_index].func) {
+            canvas.fillScreen(TFT_BLACK);
+            testList[menu_index].func();
+            canvas.fillScreen(TFT_BLACK);
+        }
+    }
+
+    canvas.pushSprite(&gfx, 0, 0);
+    // vTaskDelay(1 / portTICK_PERIOD_MS);  // 降低延时让动画更流畅
+}
+
+void StopWatchApp::drawHeader()
+{
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextDatum(top_center);
+    canvas.drawString("StopWatch Test v0.1", 233, 30);
+    canvas.drawLine(50, 50, 416, 50, TFT_DARKGRAY);
+}
+
+void StopWatchApp::drawFooter()
+{
+    static uint16_t vbat                  = 0;
+    static uint16_t input_voltage         = 0;
+    static uint16_t _5vinout_voltage      = 0;
+    static pm1_gpio_in_state_t gpio_state = PM1_GPIO_IN_STATE_LOW;
+    static uint32_t vbat_last_read        = 0;
+    if (lgfx::v1::millis() - vbat_last_read > 1000) {
+        pm1_vbat_read(&vbat);
+        pm1_vin_read(&input_voltage);
+        pm1_5vinout_read(&_5vinout_voltage);
+        pm1_gpio_get_in_state(PMG2_CHG_STAT, &gpio_state);
+        vbat_last_read = lgfx::v1::millis();
+    }
+
+    canvas.setTextSize(1);
+    canvas.setTextDatum(bottom_center);
+    canvas.fillRect(0, 430, 466, 30, TFT_BLACK);
+
+    char buf[48];
+    if (gpio_state == PM1_GPIO_IN_STATE_HIGH) {
+        canvas.setTextColor(TFT_RED, TFT_BLACK);
+    } else {
+        canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+    }
+    sprintf(buf, "BAT: %dmV", vbat);
+    canvas.drawString(buf, 233, 460);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    sprintf(buf, "VIN: %dmV, 5VIO: %dmV", input_voltage, _5vinout_voltage);
+    canvas.drawString(buf, 233, 440);
+    canvas.drawLine(50, 440, 416, 440, TFT_DARKGRAY);
+}
+
+// 辅助函数：计算弧形偏移
+int get_curved_offset(float deltaY)
+{
+    const float radius     = 400.0f;  // 弧线半径
+    const float max_offset = 100.0f;  // 最大向右挤出的距离
+
+    float y = abs(deltaY);
+    if (y > radius) y = radius;
+
+    // 圆方程: x = r - sqrt(r^2 - y^2)
+    float x = radius - sqrtf(radius * radius - y * y);
+    return (int)(std::min(x, max_offset));
+}
+
+void StopWatchApp::drawMenu()
+{
+    int center_y = 233;  // 屏幕中心
+    int item_h   = 30;   // 每行间距
+
+    canvas.setTextDatum(middle_left);  // 改为左对齐，方便配合弧形
+
+    // 渲染范围：当前索引前后 5 个
+    for (int i = -6; i <= 6; i++) {
+        // 算出真实索引（处理循环）
+        int idx = (menu_index + i) % (int)testList.size();
+        if (idx < 0) idx += testList.size();
+
+        // 这样当 menu_index 变化时，所有项会平滑移动
+        float relative_pos = (menu_index + i) - scroll_offset;
+        int y_pos          = center_y + (relative_pos * item_h);
+
+        // 只有在屏幕范围内的才画
+        if (y_pos > 70 && y_pos < 410) {
+            // 计算弧形 X 偏移
+            int x_offset = get_curved_offset(y_pos - center_y);
+            int base_x   = 80 + x_offset;  // 基础左边距 + 弧形偏移
+
+            // 区分选中态和非选中态
+            if (i == 0) {
+                // 选中项加个高亮框
+                canvas.fillRoundRect(base_x - 10, y_pos - 20, 300, 40, 8, TFT_SKYBLUE);
+                canvas.setTextColor(TFT_WHITE);
+                canvas.setTextSize(2);
+                canvas.drawString(testList[idx].name, base_x, y_pos);
+            } else {
+                // 非选中项渐变透明（颜色变暗）
+                int alpha = 255 - (abs(i) * 30);  // 越远越暗
+                if (alpha < 50) alpha = 50;
+                uint16_t color = canvas.color565(alpha, alpha, alpha);
+
+                canvas.setTextColor(color);
+                canvas.setTextSize(1);
+                canvas.drawString(testList[idx].name, base_x, y_pos > 233 ? y_pos + 5 : y_pos - 5);
+            }
+        }
+    }
+
+    // 画一个红色的固定指示器（参考代码中的 Selector）
+    canvas.drawRoundRect(60, center_y - 25, 340, 50, 10, TFT_RED);
+}
+
+void StopWatchApp::drawTitle(const char *title)
+{
+    canvas.setTextDatum(top_center);
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.setTextSize(1);
+    canvas.drawString(title, 233, 30);
+    canvas.drawLine(0, 50, 466, 50, TFT_WHITE);
+    canvas.setTextSize(2);
+}
+
+// ================= 具体测试实现 =================
+
+// 1. I2C Rate
+void StopWatchApp::test_i2c_rate()
+{
+    int selection = 0;  // 0: 400k, 1: 100k
+    while (1) {
+        app.drawTitle(testList[0].name);
+        canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+        canvas.drawString("左键切换 右键确定", 233, 60);
+        canvas.drawString("设置PMIC PY32 I2C速率", 233, 100);
+        canvas.setTextDatum(middle_center);
+
+        canvas.setTextColor(selection == 0 ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+        canvas.drawString(selection == 0 ? "> 400 KHz <" : "  400 KHz  ", 233, 200);
+
+        canvas.setTextColor(selection == 1 ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+        canvas.drawString(selection == 1 ? "> 100 KHz <" : "  100 KHz  ", 233, 260);
+
+        canvas.pushSprite(&gfx, 0, 0);
+
+        app.updateInputs(false);
+        if (app._inputs.btnLeftClicked) selection = !selection;
+        if (app._inputs.btnRightClicked) {
+            stop_watch_set_i2c_speed(selection == 0 ? true : false);
+            return;
+        }
+        vTaskDelay(10);
+    }
+}
+
+// 2. Grove 5V
+void StopWatchApp::test_grove_5v()
+{
+    int mode = 0;  // 0: INPUT, 1: OUTPUT
+    while (1) {
+        app.drawTitle(testList[1].name);
+        canvas.drawString("左键切换 右键确定", 233, 60);
+        canvas.setTextDatum(middle_center);
+        canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+        canvas.drawString(mode == 0 ? "> INPUT <" : "  INPUT  ", 233, 200);
+        canvas.drawString(mode == 1 ? "> OUTPUT <" : "  OUTPUT  ", 233, 260);
+        canvas.pushSprite(&gfx, 0, 0);
+
+        app.updateInputs(false);
+        if (app._inputs.btnLeftClicked) mode = !mode;
+        if (app._inputs.btnRightClicked) {
+            pm1_pwr_set_cfg(PM1_PWR_CFG_5V_INOUT, mode == 1 ? PM1_PWR_CFG_5V_INOUT : 0, NULL);
+            return;
+        }
+        vTaskDelay(10);
+    }
+}
+
+// 3. Charge Switch
+void StopWatchApp::test_charge_switch()
+{
+    int opt            = 0;
+    const char *opts[] = {"关闭充电", "输出高电平,慢充", "输出高电平,快充"};
+    while (1) {
+        app.drawTitle(testList[2].name);
+        canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+        canvas.drawString("左键切换 右键确定", 233, 60);
+        for (int i = 0; i < 3; i++) {
+            canvas.setTextColor(opt == i ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+            canvas.drawString(opt == i ? ("> " + std::string(opts[i]) + "<").c_str() : opts[i], 233, 200 + i * 40);
+        }
+        canvas.pushSprite(&gfx, 0, 0);
+
+        app.updateInputs(false);
+        if (app._inputs.btnLeftClicked) opt = (opt + 1) % 3;
+        if (app._inputs.btnRightClicked) {
+            if (opt == 0)
+                pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, 0, NULL);
+            else {
+                pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, PM1_PWR_CFG_CHG_EN, NULL);
+                // Fast/Slow logic using PMG3_CHG_PROG
+                if (opt == 2) {
+                    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_HIGH, PM1_GPIO_PUPD_NC,
+                                 PM1_GPIO_DRV_PUSH_PULL);
+                } else {
+                    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_LOW, PM1_GPIO_PUPD_NC,
+                                 PM1_GPIO_DRV_PUSH_PULL);
+                }
+            }
+            return;
+        }
+        vTaskDelay(10);
+    }
+}
+
+// 4. Status Display
+void StopWatchApp::test_status_show()
+{
+    app.drawTitle(testList[3].name);
+    canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+    canvas.drawString("右键退出", 233, 60);
+    canvas.setTextSize(1.5);
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) return;
+
+        uint16_t vbat, vin, v5v, vref;
+        pm1_vbat_read(&vbat);
+        pm1_vin_read(&vin);
+        pm1_5vinout_read(&v5v);
+        pm1_vref_read(&vref);
+
+        canvas.setTextDatum(top_left);
+        canvas.setCursor(100, 100);
+        canvas.printf("VBAT: %d mV   ", vbat);
+        canvas.setCursor(100, 160);
+        canvas.printf("VIN : %d mV   ", vin);
+        canvas.setCursor(100, 220);
+        canvas.printf("5VIO: %d mV   ", v5v);
+        canvas.setCursor(100, 280);
+        canvas.printf("VREF: %d mV   ", vref);
+
+        canvas.setTextDatum(bottom_center);
+        canvas.drawString("Press Right to Exit", 233, 400);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(10);
+    }
+}
+
+// 5. Display Color
+void StopWatchApp::test_display_color()
+{
+    int colors[] = {TFT_WHITE, TFT_RED, TFT_GREEN, TFT_BLUE, TFT_BLACK, TFT_WHITE};
+    int c_idx = 0;
+    gfx.fillScreen(colors[c_idx]);
+
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnLeftClicked) {
+            c_idx = (c_idx + 1) % 6;
+            if (c_idx == 4) {
+                gfx.pushImage(0, 0, 466, 466, circle_red_white);
+            } else if (c_idx == 5) {
+                gfx.pushImage(0, 0, 466, 466, circle_white_black);
+            } else {
+                gfx.fillScreen(colors[c_idx]);
+            }
+        }
+        if (app._inputs.btnRightClicked) return;
+
+        vTaskDelay(10);
+    }
+}
+
+// 6. Touch Test
+void StopWatchApp::test_touch_draw()
+{
+    canvas.fillScreen(TFT_BLACK);
+    app.drawTitle(testList[5].name);
+    canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+    canvas.drawString("左键清屏 右键退出", 233, 60);
+
+    // 用于记录上一次的坐标
+    static int last_x             = -1;
+    static int last_y             = -1;
+    static uint16_t current_color = TFT_WHITE;
+
+    gpio_set_direction((gpio_num_t)TP_INT_IRQ_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)TP_INT_IRQ_PIN, GPIO_PULLUP_ONLY);
+
+    while (1) {
+        app.updateInputs(true);
+
+        // 左键清屏
+        if (app._inputs.btnLeftClicked) {
+            canvas.fillScreen(TFT_BLACK);
+        }
+
+        // 右键退出
+        if (app._inputs.btnRightClicked) return;
+
+        // 触摸逻辑处理
+        if (cst820_status == 0) {
+            // 刚按下：生成一个新颜色，并记录起点
+            current_color = lgfx::color565(rand() % 256, rand() % 256, rand() % 256);
+            last_x        = cst820_x;
+            last_y        = cst820_y;
+            canvas.fillCircle(cst820_x, cst820_y, 2, current_color);
+        } else if (cst820_status == 2) {
+            // 移动中：如果上次坐标有效，则画线连接
+            if (last_x != -1 && last_y != -1) {
+                canvas.drawLine(last_x, last_y, cst820_x, cst820_y, current_color);
+            }
+            last_x = cst820_x;
+            last_y = cst820_y;
+        } else if (cst820_status == 1) {
+            // 抬起：重置坐标，断开连接
+            last_x = -1;
+            last_y = -1;
+        }
+
+        // 调试信息显示
+        int irq = gpio_get_level((gpio_num_t)TP_INT_IRQ_PIN);
+        char buf[64];
+        sprintf(buf, "X:%3d Y:%3d S:%d G13:%d", cst820_x, cst820_y, cst820_status, irq);
+
+        // 在底部显示坐标，背景涂黑防止重叠
+        canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+        canvas.setTextDatum(bottom_center);
+        canvas.setTextSize(1);
+        canvas.drawString(buf, 233, 233);
+
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1);
+    }
+}
+
+// 7. Audio Record
+void StopWatchApp::test_audio_record()
+{
+    enum State { IDLE, RECORDING, FINISHED };
+    State state                     = IDLE;
+    unsigned long record_start_time = 0;
+    uint8_t *rec_data               = NULL;
+    size_t rec_size                 = 0;
+
+    // 初始化音频驱动
+    audio_init();
+    audio_speaker_enable(false);  // 录音时关闭 PA 防止啸叫
+
+    while (1) {
+        app.updateInputs(false);
+
+        // 界面绘制
+        canvas.fillScreen(TFT_BLACK);
+        app.drawTitle(testList[6].name);  // "7. 录音测试"
+        canvas.setTextDatum(middle_center);
+
+        if (state == IDLE) {
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+            canvas.setTextSize(2);
+            canvas.drawString("按左键开始录音", 233, 200);
+            canvas.setTextSize(1.5);
+            canvas.drawString("按右键退出", 233, 280);
+
+            // 逻辑处理
+            if (app._inputs.btnLeftClicked) {
+                if (audio_start_record() == 0) {
+                    state             = RECORDING;
+                    record_start_time = getMillis();
+                } else {
+                    canvas.drawString("内存不足!", 233, 233);
+                    canvas.pushSprite(&gfx, 0, 0);
+                    vTaskDelay(1000);
+                }
+            }
+            if (app._inputs.btnRightClicked) {
+                break;  // 退出
+            }
+
+        } else if (state == RECORDING) {
+            unsigned long duration = (getMillis() - record_start_time) / 1000;
+
+            // UI
+            canvas.setTextColor(TFT_RED, TFT_BLACK);
+            canvas.setTextSize(2);
+            canvas.drawString("正在录音...", 233, 180);
+            char buf[32];
+            sprintf(buf, "%ld / 30 s", duration);
+            canvas.drawString(buf, 233, 220);
+            canvas.setTextSize(1.5);
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+            canvas.drawString("再次按左键停止", 233, 300);
+
+            // 逻辑: 超时或按键停止
+            if (duration >= 30 || app._inputs.btnLeftClicked) {
+                audio_stop_record(&rec_data, &rec_size);
+                state = FINISHED;
+
+                // 自动连接 WiFi 并启动 Server
+                if (!wifi_manager_is_connected()) {
+                    canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+                    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+                    canvas.drawString("正在连接WiFi...", 233, 200);
+                    canvas.pushSprite(&gfx, 0, 0);
+                    wifi_manager_connect(WIFI_SSID, WIFI_PASS, 10000);
+                }
+
+                if (wifi_manager_is_connected()) {
+                    audio_start_web_server();
+                }
+            }
+
+        } else if (state == FINISHED) {
+            // UI
+            canvas.setTextSize(1.5);
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+            canvas.drawString("录音完成!", 233, 120);
+
+            // WiFi 信息
+            if (wifi_manager_is_connected()) {
+                char ip[32];
+                wifi_manager_get_ip(ip, sizeof(ip));
+                canvas.setTextSize(1);
+                canvas.setTextColor(TFT_CYAN, TFT_BLACK);
+                char url[64];
+                sprintf(url, "WIFI M5Stack下载: http://%s/", ip);
+                canvas.drawString(url, 233, 160);
+            } else {
+                canvas.setTextColor(TFT_RED, TFT_BLACK);
+                canvas.drawString("WiFi 连接失败", 233, 160);
+            }
+
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+            canvas.setTextSize(1.5);
+            canvas.drawString("左键: 本地播放", 233, 250);
+            canvas.drawString("右键: 退出并清理", 233, 300);
+
+            if (app._inputs.btnLeftClicked) {
+                canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+                canvas.drawString("正在播放...", 233, 350);
+                canvas.pushSprite(&gfx, 0, 0);
+
+                audio_speaker_enable(true);
+                audio_set_volume(100);
+                audio_play_data(rec_data, rec_size);
+                audio_speaker_enable(false);
+            }
+            if (app._inputs.btnRightClicked) {
+                break;  // 退出
+            }
+        }
+
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(20);
+    }
+
+    audio_deinit();  // 停止 Server，停止录音任务，释放 Buffer，关闭 I2S
+}
+
+// 8. Audio Play
+void StopWatchApp::test_audio_play()
+{
+    // 菜单状态定义
+    enum MenuLevel { LEVEL_MAIN, LEVEL_VOLUME_SET, LEVEL_PA_SET, LEVEL_PLAY_TYPE_SET };
+    enum MainItems { ITEM_VOLUME, ITEM_PA, ITEM_PLAY_TYPE, ITEM_PLAY, ITEM_EXIT, ITEM_COUNT };
+
+    // 状态变量
+    MenuLevel current_level = LEVEL_MAIN;
+    int cursor              = 0;  // 主菜单光标 0~4
+
+    // 设置变量
+    const int vol_options[] = {0, 25, 50, 75, 100};
+    int vol_idx             = 2;  // 默认 50%
+    bool pa_enable          = true;
+    uint8_t play_type_idx   = 0;  // 默认 0
+
+    // 初始化音频
+    audio_init();
+    audio_set_volume(vol_options[vol_idx]);
+    audio_speaker_enable(pa_enable);
+    audio_play_stop();
+
+    while (1) {
+        // 1. 输入处理
+        app.updateInputs(false);
+
+        // 2. 逻辑处理
+        if (current_level == LEVEL_MAIN) {
+            // --- 主菜单逻辑 ---
+            if (app._inputs.btnLeftClicked) {
+                // 左键：向下移动光标
+                cursor = (cursor + 1) % ITEM_COUNT;
+            }
+            if (app._inputs.btnRightClicked) {
+                // 右键：确认/进入
+                switch (cursor) {
+                    case ITEM_VOLUME:
+                        current_level = LEVEL_VOLUME_SET;
+                        break;
+                    case ITEM_PA:
+                        current_level = LEVEL_PA_SET;
+                        break;
+                    case ITEM_PLAY_TYPE:
+                        current_level = LEVEL_PLAY_TYPE_SET;
+                        break;
+                    case ITEM_PLAY:
+                        if (audio_is_playing()) {
+                            audio_play_stop();
+                        } else {
+                            audio_play_demo(play_type_idx);
+                        }
+                        break;
+                    case ITEM_EXIT:
+                        audio_play_stop();
+                        audio_deinit();
+                        return;  // 退出函数
+                }
+            }
+        } else if (current_level == LEVEL_VOLUME_SET) {
+            // --- 音量设置逻辑 ---
+            if (app._inputs.btnLeftClicked) {
+                // 左键：循环切换音量
+                vol_idx = (vol_idx + 1) % 5;
+                audio_set_volume(vol_options[vol_idx]);
+            }
+            if (app._inputs.btnRightClicked) {
+                // 右键：确认并返回
+                current_level = LEVEL_MAIN;
+            }
+        } else if (current_level == LEVEL_PA_SET) {
+            // --- 功放设置逻辑 ---
+            if (app._inputs.btnLeftClicked) {
+                // 左键：切换开关
+                pa_enable = !pa_enable;
+                audio_speaker_enable(pa_enable);
+            }
+            if (app._inputs.btnRightClicked) {
+                // 右键：确认并返回
+                current_level = LEVEL_MAIN;
+            }
+        } else if (current_level == LEVEL_PLAY_TYPE_SET) {
+            // --- 播放音频设置逻辑 ---
+            if (app._inputs.btnLeftClicked) {
+                // 左键：循环切换播放类型
+                play_type_idx = (play_type_idx + 1) % 2;
+            }
+            if (app._inputs.btnRightClicked) {
+                // 右键：确认并返回
+                current_level = LEVEL_MAIN;
+            }
+        }
+
+        // 3. 界面绘制
+        canvas.fillScreen(TFT_BLACK);
+        app.drawTitle(testList[7].name);  // "8. 播放测试"
+
+        // 布局参数
+        int start_y     = 100;
+        int line_h      = 50;
+        int left_margin = 60;
+        int right_val_x = 350;
+
+        // --- 绘制菜单项 ---
+        canvas.setTextSize(1.5);
+        canvas.setTextDatum(middle_left);
+
+        // Item 1: 音量
+        if (current_level == LEVEL_VOLUME_SET)
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+        else if (cursor == ITEM_VOLUME)
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);  // 高亮
+        else
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+
+        canvas.drawString("1. 音量设置", left_margin, start_y);
+
+        char vol_str[16];
+        sprintf(vol_str, "< %d%% >", vol_options[vol_idx]);
+        canvas.setTextDatum(middle_right);
+        canvas.drawString(vol_str, right_val_x, start_y);
+
+        // Item 2: 功放
+        canvas.setTextDatum(middle_left);
+        if (current_level == LEVEL_PA_SET)
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+        else if (cursor == ITEM_PA)
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+        else
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+        canvas.drawString("2. 功放开关", left_margin, start_y + line_h);
+
+        canvas.setTextDatum(middle_right);
+        canvas.drawString(pa_enable ? "[ 开启 ]" : "[ 关闭 ]", right_val_x, start_y + line_h);
+
+        // Item 3: 播放类型
+        canvas.setTextDatum(middle_left);
+        if (current_level == LEVEL_PLAY_TYPE_SET)
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+        else if (cursor == ITEM_PLAY_TYPE)
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+        else
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+        canvas.drawString("3. 选择音频", left_margin, start_y + line_h * 2);
+        canvas.setTextDatum(middle_right);
+        canvas.drawString(play_type_idx == 0 ? "[ 歌曲 ]" : "[ 音频 ]", right_val_x, start_y + line_h * 2);
+
+        // Item 4: 播放/暂停
+        canvas.setTextDatum(middle_left);
+        if (cursor == ITEM_PLAY)
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+        else
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+
+        bool is_playing = audio_is_playing();
+        canvas.drawString(is_playing ? "4. 暂停播放" : "4. 开始播放", left_margin, start_y + line_h * 3);
+
+        // 状态图标
+        canvas.setTextDatum(middle_right);
+        canvas.setTextColor(TFT_CYAN, TFT_BLACK);
+        canvas.drawString(is_playing ? "播放中" : "停止中", right_val_x, start_y + line_h * 3);
+
+        // Item 5: 退出
+        canvas.setTextDatum(middle_left);
+        if (cursor == ITEM_EXIT)
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+        else
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+        canvas.drawString("4. 退出测试", left_margin, start_y + line_h * 4);
+
+        // --- 底部操作提示 ---
+        canvas.setTextDatum(bottom_center);
+        canvas.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+        canvas.setTextSize(1);
+        if (current_level == LEVEL_MAIN) {
+            canvas.drawString("左键: 移动光标   右键: 确认/切换", 233, 400);
+        } else if (current_level == LEVEL_VOLUME_SET) {
+            canvas.drawString("左键: 调节音量   右键: 完成", 233, 400);
+        } else if (current_level == LEVEL_PA_SET) {
+            canvas.drawString("左键: 切换开关   右键: 完成", 233, 400);
+        } else if (current_level == LEVEL_PLAY_TYPE_SET) {
+            canvas.drawString("左键: 切换音频   右键: 完成", 233, 400);
+        }
+
+        // --- 播放进度条 ---
+        if (is_playing) {
+            size_t curr = 0, total = 1;
+            audio_get_progress(&curr, &total);
+            if (total == 0) total = 1;  // 防止除零
+
+            int bar_x = 40;
+            int bar_y = 330;
+            int bar_w = 386;
+            int bar_h = 10;
+
+            // 绘制外框
+            canvas.drawRect(bar_x, bar_y, bar_w, bar_h, TFT_WHITE);
+
+            // 绘制填充
+            float pct  = (float)curr / (float)total;
+            int fill_w = (int)(bar_w * pct);
+            canvas.fillRect(bar_x + 1, bar_y + 1, fill_w - 2, bar_h - 2, TFT_GREEN);
+
+            // 绘制时间文本
+            // 假设 44100Hz, 16bit, Mono => 88200 bytes/sec
+            int audio_bytes_per_sec = play_type_idx == 0 ? 88200 : 176400;
+            int total_sec           = total / audio_bytes_per_sec;
+            int curr_sec            = curr / audio_bytes_per_sec;
+            char time_buf[32];
+            sprintf(time_buf, "%02d:%02d / %02d:%02d", curr_sec / 60, curr_sec % 60, total_sec / 60, total_sec % 60);
+
+            canvas.setTextDatum(bottom_right);
+            canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+            canvas.drawString(time_buf, bar_x + bar_w, bar_y - 5);
+        }
+
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(20);  // 刷新率约 50fps
+    }
+}
+
+// 9. IMU
+void StopWatchApp::test_imu_data()
+{
+    bmi270_tools b_tools;
+    static i2c_bus_device_handle_t dev_h = i2c_bus_device_create(g_i2c_bus, BMI270_ADDR, 100000);
+    b_tools.init(g_i2c_bus, &dev_h, true, bmi270_tools::MODE_CONTEXT);
+    b_tools.enable_default_sensors();
+
+    init_stopwatch_geometry();
+
+    Point2D projected[CYLINDER_POINTS * 2];
+    float scale = 120.0;
+    int centerX = 233;
+    int centerY = 260;
+
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) return;
+
+        bmi270_tools::sensor_data_t data;
+        b_tools.get_sensor_data(data);
+
+        float pitch = atan2(-data.acc_x, data.acc_z);
+        float roll  = atan2(data.acc_y, sqrt(data.acc_x * data.acc_x + data.acc_z * data.acc_z));
+
+        canvas.fillSprite(TFT_BLACK);
+
+        app.drawTitle(testList[8].name);
+        canvas.setTextSize(1);
+        canvas.setTextColor(TFT_DARKGREY);
+        canvas.setTextDatum(top_center);
+        char buf[40];
+        sprintf(buf, "ACC: %.2f, %.2f, %.2f", data.acc_x, data.acc_y, data.acc_z);
+        canvas.drawString(buf, 233, 60);
+        sprintf(buf, "GYR: %.2f, %.2f, %.2f", data.gyr_x, data.gyr_y, data.gyr_z);
+        canvas.drawString(buf, 233, 85);
+
+        for (int i = 0; i < CYLINDER_POINTS * 2; i++) {
+            Point3D p = stopwatch_vertices[i];
+
+            // 1. 绕 X 轴旋转 (Pitch)
+            float y1 = p.y * cos(pitch) - p.z * sin(pitch);
+            float z1 = p.y * sin(pitch) + p.z * cos(pitch);
+            float x1 = p.x;
+
+            // 2. 绕 Y 轴旋转 (Roll)
+            float x2 = x1 * cos(roll) + z1 * sin(roll);
+            float z2 = -x1 * sin(roll) + z1 * cos(roll);
+            float y2 = y1;
+
+            // 3. 投影到屏幕 (添加透视)
+            float perspective = 400.0 / (400.0 + z2);
+            projected[i].x    = centerX + x2 * scale * perspective;
+            projected[i].y    = centerY + y2 * scale * perspective;
+        }
+
+        // --- 绘制部分 ---
+        // 1. 先画底面 (Depth buffer 模拟：先画后面的线)
+        for (int i = 0; i < CYLINDER_POINTS; i++) {
+            int next = (i + 1) % CYLINDER_POINTS;
+            canvas.drawLine(projected[i + CYLINDER_POINTS].x, projected[i + CYLINDER_POINTS].y,
+                            projected[next + CYLINDER_POINTS].x, projected[next + CYLINDER_POINTS].y,
+                            0x52AA);  // 深灰蓝
+        }
+
+        // 2. 画侧边连线
+        for (int i = 0; i < CYLINDER_POINTS; i++) {
+            if (i % 2 == 0) {  // 减少线条密度，看起来更清晰
+                canvas.drawLine(projected[i].x, projected[i].y, projected[i + CYLINDER_POINTS].x,
+                                projected[i + CYLINDER_POINTS].y, TFT_DARKGREY);
+            }
+        }
+
+        // 3. 画顶面 (最上面，用亮色)
+        for (int i = 0; i < CYLINDER_POINTS; i++) {
+            int next = (i + 1) % CYLINDER_POINTS;
+            canvas.drawLine(projected[i].x, projected[i].y, projected[next].x, projected[next].y, TFT_CYAN);
+        }
+
+        // 在顶面圆心画一个标记，确认方向
+        // 顶面圆心其实就是投影后的原点偏移（或者计算所有顶面点的平均值）
+        canvas.fillCircle(projected[0].x, projected[0].y, 4,
+                          TFT_RED);  // 12点钟方向标记
+
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+}
+
+// 10. RTC
+void StopWatchApp::test_rtc_show()
+{
+    rx8130.begin(g_i2c_bus, RX8130_ADDR);
+    app.drawTitle(testList[9].name);
+
+    bool sntp_synced             = false;
+    static bool sntp_initialized = false;
+
+    while (1) {
+        canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+
+        struct tm rtc_time;
+        rx8130.getTime(&rtc_time);
+
+        canvas.setTextDatum(middle_center);
+        canvas.setTextSize(3);
+        canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+
+        char buf[64];
+        sprintf(buf, "%04d-%02d-%02d", rtc_time.tm_year + 1900, rtc_time.tm_mon + 1, rtc_time.tm_mday);
+        canvas.drawString(buf, 233, 160);
+
+        sprintf(buf, "%02d:%02d:%02d", rtc_time.tm_hour, rtc_time.tm_min, rtc_time.tm_sec);
+        canvas.drawString(buf, 233, 210);
+
+        canvas.setTextSize(1);
+        canvas.setTextDatum(bottom_center);
+
+        if (wifi_manager_is_connected()) {
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+            canvas.drawString("WiFi: 已连接", 233, 300);
+        } else {
+            canvas.setTextColor(TFT_RED, TFT_BLACK);
+            canvas.drawString("WiFi: 未连接", 233, 300);
+        }
+
+        canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+        canvas.drawString("左键：同步网络时间", 233, 350);
+        canvas.drawString("右键：退出", 233, 380);
+
+        canvas.pushSprite(&gfx, 0, 0);
+
+        app.updateInputs(false);
+
+        if (app._inputs.btnLeftClicked) {
+            canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+            canvas.setTextDatum(middle_center);
+            canvas.setTextSize(1.5);
+
+            if (!wifi_manager_is_connected()) {
+                canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+                canvas.drawString("正在连接WiFi...", 233, 200);
+                canvas.pushSprite(&gfx, 0, 0);
+
+                wifi_status_t status = wifi_manager_connect(WIFI_SSID, WIFI_PASS, 15000);
+
+                if (status != WIFI_STATUS_CONNECTED) {
+                    canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+                    canvas.setTextColor(TFT_RED, TFT_BLACK);
+                    canvas.drawString("WiFi连接失败", 233, 233);
+                    canvas.pushSprite(&gfx, 0, 0);
+                    vTaskDelay(2000);
+                    continue;
+                }
+            }
+
+            canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+            canvas.drawString("WiFi已连接", 233, 180);
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+            canvas.drawString("正在同步时间...", 233, 220);
+            canvas.pushSprite(&gfx, 0, 0);
+
+            if (!sntp_initialized) {
+                esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+                esp_sntp_setservername(0, "ntp.aliyun.com");
+                esp_sntp_setservername(1, "ntp1.aliyun.com");
+                esp_sntp_setservername(2, "pool.ntp.org");
+                esp_sntp_setservername(3, "time.apple.com");
+                sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+                esp_sntp_init();
+                sntp_initialized = true;
+            }
+
+            setenv("TZ", "CST-8", 1);
+            tzset();
+
+            int retry                      = 0;
+            sntp_synced                    = false;
+            sntp_sync_status_t sync_status = sntp_get_sync_status();
+            while (sync_status == SNTP_SYNC_STATUS_RESET && retry < 100) {
+                vTaskDelay(100);
+                retry++;
+                sync_status = sntp_get_sync_status();
+            }
+
+            if (sync_status == SNTP_SYNC_STATUS_COMPLETED) {
+                sntp_synced = true;
+
+                time_t now;
+                struct tm timeinfo;
+                time(&now);
+                localtime_r(&now, &timeinfo);
+
+                rx8130.setTime(&timeinfo);
+
+                canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+                canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+                canvas.drawString("时间同步成功！", 233, 200);
+
+                canvas.setTextSize(2);
+                sprintf(buf, "%d-%d-%d", timeinfo.tm_year + 2000, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+                canvas.drawString(buf, 233, 250);
+                sprintf(buf, "%d:%d:%d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+                canvas.drawString(buf, 233, 290);
+
+                canvas.pushSprite(&gfx, 0, 0);
+                vTaskDelay(2000);
+            } else {
+                time_t now;
+                struct tm info;
+                time(&now);
+                localtime_r(&now, &info);
+                ESP_LOGI(TAG, "Sync failed, current time: %d-%d-%d %d:%d:%d", info.tm_year + 1900, info.tm_mon + 1,
+                         info.tm_mday, info.tm_hour, info.tm_min, info.tm_sec);
+                canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+                canvas.setTextColor(TFT_RED, TFT_BLACK);
+                canvas.drawString("时间同步失败", 233, 233);
+                canvas.pushSprite(&gfx, 0, 0);
+                vTaskDelay(2000);
+            }
+        }
+
+        if (app._inputs.btnRightClicked) {
+            return;
+        }
+
+        vTaskDelay(100);
+    }
+}
+
+// 11. Vibration
+void StopWatchApp::test_vibration()
+{
+    int strength = 0;
+    // Motor on PY32_IO_EXPANDER, Pin 9
+    io_expander.pinMode(PY32_MOTOR_EN_PIN, OUTPUT);
+    io_expander.setPwmFrequency(5000);
+    app.drawTitle(testList[10].name);
+    canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+
+    while (1) {
+        char buf[32];
+        sprintf(buf, "强度: %d%%", strength);
+        canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+        canvas.setTextDatum(top_center);
+        canvas.drawString(buf, 233, 220);
+        canvas.drawString("左键：增加强度 右键：退出", 233, 260);
+        canvas.pushSprite(&gfx, 0, 0);
+
+        app.updateInputs(false);
+        if (app._inputs.btnLeftClicked) {
+            strength = (strength + 10);
+            if (strength > 100) strength = 0;
+            // Map 0-100 to PWM duty
+            io_expander.setPwmDuty(PY32_MOTOR_PWM_CHANNEL, strength, false, true);
+        }
+        if (app._inputs.btnRightClicked) {
+            io_expander.setPwmDuty(PY32_MOTOR_PWM_CHANNEL, 0, false, true);  // Off
+            return;
+        }
+        vTaskDelay(10);
+    }
+}
+
+// 12. Grove IO
+void StopWatchApp::test_grove_io()
+{
+    app.drawTitle(testList[11].name);
+    canvas.drawString("右键退出", 233, 60);
+    gpio_reset_pin(GROVE_3_PIN);
+    gpio_reset_pin(GROVE_4_PIN);
+    gpio_set_direction(GROVE_3_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(GROVE_4_PIN, GPIO_MODE_OUTPUT);
+    unsigned long last_time = 0;
+    uint8_t gpio_3_level    = 1;
+    uint8_t gpio_4_level    = 0;
+    gpio_set_level(GROVE_3_PIN, gpio_3_level);
+    gpio_set_level(GROVE_4_PIN, gpio_4_level);
+
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) return;
+
+        if (getMillis() - last_time > 500) {
+            gpio_3_level = !gpio_3_level;
+            gpio_4_level = !gpio_4_level;
+            gpio_set_level(GROVE_3_PIN, gpio_3_level);
+            gpio_set_level(GROVE_4_PIN, gpio_4_level);
+            last_time = getMillis();
+        }
+        char buf[32];
+        sprintf(buf, "GPIO3: %d  GPIO4: %d", gpio_3_level, gpio_4_level);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(10);
+    }
+}
+
+// 13. Bottom IO
+void StopWatchApp::test_bottom_io()
+{
+    app.drawTitle(testList[12].name);
+    canvas.drawString("右键退出", 233, 60);
+    unsigned long last_time = 0;
+    int idx                 = 3;  // 3-9
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) return;
+        if (getMillis() - last_time > 500) {
+            gpio_set_level((gpio_num_t)idx, 0);
+            idx++;
+            if (idx > 9) idx = 3;
+            gpio_set_level((gpio_num_t)idx, 1);
+            last_time = getMillis();
+        }
+        char buf[32];
+        sprintf(buf, "GPIO %d HIGH", idx);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(10);
+    }
+}
+
+// 14. CH442E
+void StopWatchApp::test_ch442e()
+{
+    app.drawTitle(testList[13].name);
+    canvas.drawString("左键切换 右键退出", 233, 60);
+    int lvl = 0;
+    while (1) {
+        canvas.drawString(lvl ? " Level: HIGH " : " Level: LOW ", 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        app.updateInputs(false);
+        if (app._inputs.btnLeftClicked) {
+            lvl = !lvl;
+            io_expander.digitalWrite(PY32_MUX_CTR_PIN, lvl);
+        }
+        if (app._inputs.btnRightClicked) return;
+        vTaskDelay(50);
+    }
+}
+
+// 15. WiFi Scan
+void StopWatchApp::test_wifi_scan()
+{
+    app.drawTitle(testList[14].name);
+
+    wifi_manager_init();
+
+    unsigned long last_time = 0;
+    canvas.drawString("扫描WIFI中", 233, 233);
+    canvas.pushSprite(&gfx, 0, 0);
+
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) {
+            return;
+        }
+
+        if (getMillis() - last_time > 3000) {
+            wifi_scan_config_t scan_config = {0};
+            esp_wifi_scan_start(&scan_config, true);
+
+            uint16_t ap_num = 0;
+            esp_wifi_scan_get_ap_num(&ap_num);
+            wifi_ap_record_t *ap_list = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * ap_num);
+            esp_wifi_scan_get_ap_records(&ap_num, ap_list);
+
+            canvas.fillScreen(TFT_BLACK);
+            app.drawTitle(testList[14].name);
+            canvas.setTextSize(1.5);
+            canvas.setTextDatum(top_center);
+            int y = 60;
+            for (int i = 0; i < ap_num && i < 10; i++) {
+                char buf[64];
+                sprintf(buf, "%s (%d)", ap_list[i].ssid, ap_list[i].rssi);
+                canvas.drawString(buf, 233, y);
+                y += 30;
+            }
+            free(ap_list);
+            canvas.pushSprite(&gfx, 0, 0);
+            last_time = getMillis();
+        }
+        vTaskDelay(10);
+    }
+}
+
+// 16. WiFi 拉距测试
+void StopWatchApp::test_wifi_distance()
+{
+    wifi_manager_init();
+
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = inet_addr(UDP_TARGET_IP);
+    dest_addr.sin_family      = AF_INET;
+    dest_addr.sin_port        = htons(UDP_TARGET_PORT);
+
+    int sock              = -1;
+    char rx_buffer[128]   = {0};
+    const char *send_data = "Hello";
+
+    int rssi            = -100;
+    int tx_count        = 0;
+    int ok_count        = 0;
+    bool socket_created = false;
+
+    uint32_t last_send_time     = 0;
+    uint32_t last_rssi_time     = 0;
+    uint32_t last_connect_retry = 0;
+    uint32_t last_ok_time       = 0;
+
+    canvas.fillScreen(TFT_BLACK);
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString("正在连接 WiFi...", 233, 233);
+    canvas.pushSprite(&gfx, 0, 0);
+
+    if (!wifi_manager_is_connected()) {
+        wifi_manager_connect(WIFI_TEST_SSID, WIFI_TEST_PASS, 5000);
+    }
+
+    while (1) {
+        app.updateInputs(false);
+        bool is_connected = wifi_manager_is_connected();
+
+        char my_ip[32] = "0.0.0.0";
+        wifi_manager_get_ip(my_ip, sizeof(my_ip));
+
+        // A. 自动重连
+        if (!is_connected) {
+            if (getMillis() - last_connect_retry > 5000) {
+                wifi_manager_connect(WIFI_TEST_SSID, WIFI_TEST_PASS, 100);
+                last_connect_retry = getMillis();
+            }
+        }
+
+        // B. Socket 管理
+        if (is_connected && !socket_created) {
+            if (strcmp(my_ip, "0.0.0.0") != 0) {
+                sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+                if (sock >= 0) {
+                    // 设置超时
+                    struct timeval timeout;
+                    timeout.tv_sec  = 0;
+                    timeout.tv_usec = 50000;  // 50ms
+                    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+                    // 绑定本地端口
+                    struct sockaddr_in local_addr;
+                    local_addr.sin_family      = AF_INET;
+                    local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+                    local_addr.sin_port        = htons(UDP_TARGET_PORT);
+
+                    if (bind(sock, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
+                        close(sock);
+                    } else {
+                        socket_created = true;
+                    }
+                }
+            }
+        } else if (!is_connected && socket_created) {
+            close(sock);
+            socket_created = false;
+        }
+
+        // C. 获取 RSSI
+        // if (is_connected && (getMillis() - last_rssi_time > 1000)) {
+        //     wifi_ap_record_t ap_info;
+        //     if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        //         rssi = ap_info.rssi;
+        //     }
+        //     last_rssi_time = getMillis();
+        // }
+
+        // D. 发送数据 (每 1000ms 发送一次 "Hello")
+        if (socket_created && (getMillis() - last_send_time > 1000)) {
+            // 发送 5 字节: 'H','e','l','l','o'
+            int err = sendto(sock, send_data, 5, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            if (err > 0) {
+                tx_count++;
+            }
+            last_send_time = getMillis();
+        }
+
+        // E. 接收数据 (检查 "OK")
+        if (socket_created) {
+            struct sockaddr_in source_addr;
+            socklen_t socklen = sizeof(source_addr);
+            int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
+
+            if (len > 0) {
+                rx_buffer[len] = 0;
+                // 检查是否包含 "OK"
+                if (len >= 2 && rx_buffer[0] == 'O' && rx_buffer[1] == 'K') {
+                    ok_count++;
+                    last_ok_time = getMillis();
+                    // 收到 OK 时刷新一下 RSSI
+                    wifi_ap_record_t ap_info;
+                    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+                        rssi = ap_info.rssi;
+                    }
+                }
+            }
+        }
+
+        // --- 界面绘制 ---
+        canvas.fillScreen(TFT_BLACK);
+        app.drawTitle(testList[15].name);
+
+        // 1. 状态与 IP
+        canvas.setTextDatum(top_center);
+        canvas.setTextSize(1.5);
+        if (is_connected) {
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+            char ip_buf[64];
+            sprintf(ip_buf, "IP: %s", my_ip);
+            canvas.drawString(ip_buf, 233, 70);
+        } else {
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+            canvas.drawString("连接 WiFi 中...", 233, 70);
+        }
+
+        // 2. RSSI 信号大字
+        canvas.setTextDatum(middle_center);
+        if (is_connected) {
+            // 颜色逻辑：最近收到过 OK 显示绿色，否则虽然有 RSSI 但通信不通显示黄色
+            bool link_alive     = (getMillis() - last_ok_time < 2000);
+            uint16_t main_color = link_alive ? TFT_GREEN : TFT_YELLOW;
+
+            if (rssi < -85) main_color = TFT_RED;
+
+            canvas.setTextColor(main_color, TFT_BLACK);
+            canvas.setTextSize(4);
+            char rssi_str[16];
+            sprintf(rssi_str, "%d dBm", rssi);
+            canvas.drawString(rssi_str, 233, 160);
+
+            // 信号条
+            int bar_w = 200;
+            int level = (rssi + 100) * 2;
+            if (level < 0) level = 0;
+            if (level > 100) level = 100;
+            canvas.drawRect(133, 210, bar_w, 12, TFT_WHITE);
+            canvas.fillRect(133 + 1, 210 + 1, (int)(level * 2), 10, main_color);
+
+        } else {
+            canvas.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            canvas.setTextSize(3);
+            canvas.drawString("No Signal", 233, 160);
+        }
+
+        // 3. 统计数据
+        canvas.setTextSize(1);
+        canvas.setTextDatum(middle_left);
+        canvas.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+        int info_y = 260;
+        char buf[128];
+
+        sprintf(buf, "Target: %s:%d", UDP_TARGET_IP, UDP_TARGET_PORT);
+        canvas.drawString(buf, 40, info_y);
+
+        // 发送统计
+        canvas.setTextColor(TFT_CYAN, TFT_BLACK);
+        sprintf(buf, "TX (Hello): %d", tx_count);
+        canvas.drawString(buf, 40, info_y + 30);
+
+        // 接收统计
+        if (ok_count > 0) {
+            // 计算丢包率或通信质量提示
+            canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+            sprintf(buf, "RX (OK): %d  [Pass]", ok_count);
+        } else {
+            if (tx_count > 3) {
+                canvas.setTextColor(TFT_RED, TFT_BLACK);
+                sprintf(buf, "RX: 0 (No Response)");
+            } else {
+                canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+                sprintf(buf, "RX: Waiting...");
+            }
+        }
+        canvas.drawString(buf, 40, info_y + 60);
+
+        // 提示信息
+        canvas.setTextDatum(bottom_center);
+        canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+        canvas.drawString("右键：退出", 233, 400);
+
+        canvas.pushSprite(&gfx, 0, 0);
+
+        // 退出
+        if (app._inputs.btnRightClicked) {
+            break;
+        }
+
+        vTaskDelay(20);
+    }
+
+    // --- 退出清理 ---
+    if (socket_created) close(sock);
+    wifi_manager_disconnect();
+}
+
+// Power Modes wrappers
+void StopWatchApp::test_l0_mode()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后设备进入L0模式,关闭所有外设(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    stop_watch_power_mode_L0();
+}
+void StopWatchApp::test_l1_mode()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后设备进入L1模式,保持IMU和RTC(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    stop_watch_power_mode_L1();
+}
+void StopWatchApp::test_l2_mode()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后设备进入L2低功耗休眠模式(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    stop_watch_power_mode_L2();
+}
+
+void StopWatchApp::test_imu_wake()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后esp32s3进入deepsleep,晃动设备唤醒(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    wakeup_test(WakeupDevice::IMU_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+}
+void StopWatchApp::test_imu_shutdown_wake()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后设备关机,晃动设备唤醒(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    wakeup_test(WakeupDevice::IMU_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
+}
+void StopWatchApp::test_rtc_wake()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后esp32s3进入deepsleep, 10秒后唤醒(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    wakeup_test(WakeupDevice::RTC_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+}
+void StopWatchApp::test_rtc_shutdown_wake()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后设备关机, 10秒后唤醒(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    wakeup_test(WakeupDevice::RTC_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
+}
+void StopWatchApp::test_base_wake()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后设备关机, 底座插入5V唤醒(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    wakeup_test(WakeupDevice::PORT_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+}
+
+// 22. Full Load
+void StopWatchApp::test_full_load()
+{
+    app.drawTitle("Full Load Mode");
+    canvas.fillScreen(TFT_WHITE);
+    canvas.pushSprite(&gfx, 0, 0);
+
+    io_expander.setPwmDuty(PY32_MOTOR_PWM_CHANNEL, 100, false, true);
+
+    wifi_manager_init();
+
+    audio_init();
+    audio_set_volume(100);
+    audio_speaker_enable(true);
+    audio_play_stop();
+
+    unsigned long last_time = 0;
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) {
+            io_expander.setPwmDuty(PY32_MOTOR_PWM_CHANNEL, 0, false, true);
+            audio_play_stop();
+            audio_deinit();
+            return;
+        }
+        // 循环播放音频
+        if (!audio_is_playing()) {
+            audio_play_demo();
+        }
+        // 3秒扫描一次WIFI
+        if (getMillis() - last_time > 3000) {
+            canvas.fillScreen(TFT_WHITE);
+            canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+            canvas.drawString("扫描WIFI中", 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+            wifi_scan_config_t scan_config = {0};
+            esp_wifi_scan_start(&scan_config, true);
+            last_time = getMillis();
+            canvas.drawString("WIFI扫描完成,三秒后重新扫描", 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+        }
+        vTaskDelay(10);
+    }
+}
+
+// 23. Aging
+void StopWatchApp::test_aging()
+{
+    wifi_manager_init();
+    if (!wifi_manager_is_connected()) {
+        wifi_manager_connect(WIFI_SSID, WIFI_PASS, 10000);
+    }
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) {
+            gfx.setRotation(0);
+            return;
+        }
+        // 低电量关机
+        static uint16_t vbat           = 0;
+        static uint32_t vbat_last_read = 0;
+        if (lgfx::v1::millis() - vbat_last_read > 1000) {
+            pm1_vbat_read(&vbat);
+            if (vbat < 3800) {
+                canvas.drawString("电压低于3800mV,三秒后关机", 233, 233);
+                canvas.pushSprite(&gfx, 0, 0);
+                vTaskDelay(3000);
+                pm1_sys_cmd(PM1_SYS_CMD_SHUTDOWN);
+                return;
+            }
+            vbat_last_read = lgfx::v1::millis();
+        }
+        // 刷新显示
+        display_gfx_loop();
+    }
+}

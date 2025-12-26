@@ -6,21 +6,21 @@
 #include "i2c_bus.h"
 #include "setting.h"
 
-#define CST820_REG_STATUS 0x00
+#define CST820_REG_STATUS     0x00
 #define CST820_REG_GESTURE_ID 0x01
 #define CST820_REG_FINGER_NUM 0x02
-#define CST820_REG_X_H 0x03
-#define CST820_REG_X_L 0x04
-#define CST820_REG_Y_H 0x05
-#define CST820_REG_Y_L 0x06
+#define CST820_REG_X_H        0x03
+#define CST820_REG_X_L        0x04
+#define CST820_REG_Y_H        0x05
+#define CST820_REG_Y_L        0x06
 
-#define CST820_CHIP_ID 0xA7
+#define CST820_CHIP_ID  0xA7
 #define CST820_SOFT_VER 0xA9
 
 #define CST820_TOUCH_MODE 0xFA
 typedef enum {
-    CST820_TOUCH_MODE_DOT = 0x60,
-    CST820_TOUCH_MODE_GESTURE = 0x11,
+    CST820_TOUCH_MODE_DOT             = 0x60,
+    CST820_TOUCH_MODE_GESTURE         = 0x11,
     CST820_TOUCH_MODE_GESTURE_AND_DOT = 0x71,
 } cst820_touch_mode_t;
 

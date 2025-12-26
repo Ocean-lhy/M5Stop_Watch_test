@@ -1,79 +1,58 @@
 #include "audio_user.h"
-
-#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
-
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-
-#include <stdexcept>
-
+#include "freertos/task.h"
+#include "esp_http_server.h"
+#include "esp_timer.h"
 #include "power_management.h"
+#include "tools.h"
 
-// demo.pcm
+// 引入 demo.pcm 资源
 extern "C" const uint8_t _binary_demo_pcm_start[] asm("_binary_demo_pcm_start");
 extern "C" const uint8_t _binary_demo_pcm_end[] asm("_binary_demo_pcm_end");
-
-static i2c_master_bus_handle_t es_i2c_bus_handle;
-#define I2S_MAX_KEEP SOC_I2S_NUM
+extern "C" const uint8_t _binary_tone_wav_start[] asm("_binary_tone_wav_start");
+extern "C" const uint8_t _binary_tone_wav_end[] asm("_binary_tone_wav_end");
 
 static const char *TAG = "audio_user";
 
-typedef struct {
-    i2s_chan_handle_t tx_handle;
-    i2s_chan_handle_t rx_handle;
-} i2s_keep_t;
+// --- 全局变量管理 ---
+static i2s_chan_handle_t tx_handle            = NULL;
+static i2s_chan_handle_t rx_handle            = NULL;
+static esp_codec_dev_handle_t g_codec_dev     = NULL;
+static const audio_codec_data_if_t *g_data_if = NULL;
+static const audio_codec_ctrl_if_t *g_ctrl_if = NULL;
+static const audio_codec_gpio_if_t *g_gpio_if = NULL;
+static const audio_codec_if_t *g_codec_if     = NULL;
 
-static i2s_comm_mode_t i2s_in_mode  = I2S_COMM_MODE_STD;
-static i2s_comm_mode_t i2s_out_mode = I2S_COMM_MODE_STD;
-static i2s_keep_t *i2s_keep[I2S_MAX_KEEP];
+// 录音相关
+static uint8_t *g_record_buffer          = NULL;
+static size_t g_record_max_size          = 0;
+static size_t g_record_actual_size       = 0;
+static volatile bool g_is_recording      = false;
+static TaskHandle_t g_record_task_handle = NULL;
 
-static int ut_i2c_init(uint8_t port)
+// 播放相关
+static int g_current_volume            = 50;
+static TaskHandle_t g_play_task_handle = NULL;
+static const uint8_t *g_play_ptr       = NULL;
+static size_t g_play_total_len         = 0;
+static volatile size_t g_play_cursor   = 0;
+static volatile bool g_is_playing      = false;
+
+// HTTP Server 相关
+static httpd_handle_t g_server = NULL;
+
+// I2S 配置
+#define I2S_PORT I2S_NUM_0
+
+// ================= 内部辅助函数 =================
+
+static int ut_i2s_init()
 {
-    i2c_master_bus_config_t i2c_bus_config = {0};
-    i2c_bus_config.clk_source = (i2c_clock_source_t)I2C_FREQ;
-    i2c_bus_config.i2c_port = port;
-    i2c_bus_config.scl_io_num = I2C_SCL_PIN;
-    i2c_bus_config.sda_io_num = I2C_SDA_PIN;
-    i2c_bus_config.glitch_ignore_cnt = 7;
-    i2c_bus_config.flags.enable_internal_pullup = true;
-    return i2c_new_master_bus(&i2c_bus_config, &es_i2c_bus_handle);
-}
+    if (tx_handle != NULL) return 0;  // Already initialized
 
-static int ut_i2c_deinit(uint8_t port)
-{
-   if (es_i2c_bus_handle) {
-       i2c_del_master_bus(es_i2c_bus_handle);
-   }
-   es_i2c_bus_handle = NULL;
-   return 0;
-}
-
-static void ut_set_i2s_mode(i2s_comm_mode_t out_mode, i2s_comm_mode_t in_mode)
-{
-    i2s_in_mode  = in_mode;
-    i2s_out_mode = out_mode;
-}
-
-static void ut_clr_i2s_mode(void)
-{
-    i2s_in_mode  = I2S_COMM_MODE_STD;
-    i2s_out_mode = I2S_COMM_MODE_STD;
-}
-
-static int ut_i2s_init(uint8_t port)
-{
-    if (port >= I2S_MAX_KEEP) {
-        ESP_LOGE(TAG, "I2S port %d is not supported", port);
-        return -1;
-    }
-    // Already installed
-    if (i2s_keep[port]) {
-        ESP_LOGI(TAG, "I2S already installed");
-        return 0;
-    }
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
     i2s_std_config_t std_cfg   = {
           .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(44100),
           .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
@@ -86,212 +65,409 @@ static int ut_i2s_init(uint8_t port)
                   .din  = I2S_DADC_IN_PIN,
             },
     };
-    i2s_keep[port] = (i2s_keep_t *)calloc(1, sizeof(i2s_keep_t));
-    if (i2s_keep[port] == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for I2S keep");
-        return -1;
-    }
 
-    int ret = i2s_new_channel(&chan_cfg, &i2s_keep[port]->tx_handle, &i2s_keep[port]->rx_handle);
-    TEST_ESP_OK(ret);
-    if (i2s_out_mode == I2S_COMM_MODE_STD) {
-        ret = i2s_channel_init_std_mode(i2s_keep[port]->tx_handle, &std_cfg);
-        if(ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize I2S TX channel in standard mode");
-            return ret;
-        }
-    }
-    TEST_ESP_OK(ret);
-
-    if (i2s_in_mode == I2S_COMM_MODE_STD) {
-        ret = i2s_channel_init_std_mode(i2s_keep[port]->rx_handle, &std_cfg);
-        if(ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize I2S RX channel in standard mode");
-            return ret;
-        }
-    }
-    TEST_ESP_OK(ret);
-
-    // For tx master using duplex mode
-    ret = i2s_channel_enable(i2s_keep[port]->tx_handle);
-    if(ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable I2S TX channel");
-        return ret;
-    }
-
-    ret = i2s_channel_enable(i2s_keep[port]->rx_handle);
-    if(ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable I2S RX channel");
-        return ret;
-    }
-
-    return ret;
-}
-
-static int ut_i2s_deinit(uint8_t port)
-{
-    if (port >= I2S_MAX_KEEP) {
-        return -1;
-    }
-    // already installed
-    if (i2s_keep[port] == NULL) {
-        return 0;
-    }
-    // i2s_channel_disable(i2s_keep[port]->tx_handle);
-    // i2s_channel_disable(i2s_keep[port]->rx_handle);
-    i2s_del_channel(i2s_keep[port]->tx_handle);
-    i2s_del_channel(i2s_keep[port]->rx_handle);
-    free(i2s_keep[port]);
-    i2s_keep[port] = NULL;
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle));
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(tx_handle));
+    ESP_ERROR_CHECK(i2s_channel_enable(rx_handle));
     return 0;
 }
 
-static void codec_max_sample(uint8_t *data, int size, int *max_value, int *min_value)
+static void ut_i2s_deinit()
 {
-    int16_t *s = (int16_t *)data;
-    size >>= 1;
-    int i = 1, max, min;
-    max = min = s[0];
-    while (i < size) {
-        if (s[i] > max) {
-            max = s[i];
-        } else if (s[i] < min) {
-            min = s[i];
-        }
-        i++;
+    if (tx_handle) {
+        i2s_channel_disable(tx_handle);
+        i2s_del_channel(tx_handle);
+        tx_handle = NULL;
     }
-    *max_value = max;
-    *min_value = min;
+    if (rx_handle) {
+        i2s_channel_disable(rx_handle);
+        i2s_del_channel(rx_handle);
+        rx_handle = NULL;
+    }
 }
 
-void play_demo_file(esp_codec_dev_handle_t codec_dev)
-{
-    ESP_LOGI(TAG, "Playing demo file...");
-    // demo.pcm 开始与结束指针
-    const uint8_t *pcm_start = _binary_demo_pcm_start;
-    size_t pcm_len           = _binary_demo_pcm_end - _binary_demo_pcm_start;
+// WAV Header 结构体
+struct wav_header_t {
+    char chunkId[4];         // "RIFF"
+    uint32_t chunkSize;      // file size - 8
+    char format[4];          // "WAVE"
+    char subchunk1Id[4];     // "fmt "
+    uint32_t subchunk1Size;  // 16 for PCM
+    uint16_t audioFormat;    // 1 for PCM
+    uint16_t numChannels;    // 1
+    uint32_t sampleRate;     // 44100
+    uint32_t byteRate;       // 44100 * 1 * 2
+    uint16_t blockAlign;     // 2
+    uint16_t bitsPerSample;  // 16
+    char subchunk2Id[4];     // "data"
+    uint32_t subchunk2Size;  // data size
+};
 
-    // 假设 play_dev 已正常打开并设置了格式
-    esp_codec_dev_write(codec_dev, (uint8_t*)pcm_start, pcm_len);
-    ESP_LOGI(TAG, "Finished playing demo file.");
+// HTTP GET Handler (生成 WAV 下载)
+static esp_err_t record_download_get_handler(httpd_req_t *req)
+{
+    if (!g_record_buffer || g_record_actual_size == 0) {
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+
+    // 设置 Header
+    httpd_resp_set_type(req, "audio/wav");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"record.wav\"");
+
+    // 构造 WAV 头
+    struct wav_header_t wav_head;
+    memcpy(wav_head.chunkId, "RIFF", 4);
+    memcpy(wav_head.format, "WAVE", 4);
+    memcpy(wav_head.subchunk1Id, "fmt ", 4);
+    wav_head.subchunk1Size = 16;
+    wav_head.audioFormat   = 1;
+    wav_head.numChannels   = 1;
+    wav_head.sampleRate    = 44100;
+    wav_head.bitsPerSample = 16;
+    wav_head.byteRate      = 44100 * 1 * 2;
+    wav_head.blockAlign    = 2;
+    memcpy(wav_head.subchunk2Id, "data", 4);
+    wav_head.subchunk2Size = g_record_actual_size;
+    wav_head.chunkSize     = 36 + wav_head.subchunk2Size;
+
+    // 发送 WAV 头
+    httpd_resp_send_chunk(req, (const char *)&wav_head, sizeof(wav_head));
+
+    // 发送 PCM 数据
+    httpd_resp_send_chunk(req, (const char *)g_record_buffer, g_record_actual_size);
+
+    // 结束发送
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
 }
 
-// es8311 init
-void es8311_init()
+static const httpd_uri_t download_uri = {
+    .uri = "/", .method = HTTP_GET, .handler = record_download_get_handler, .user_ctx = NULL};
+
+// 后台录音任务
+static void record_task_entry(void *arg)
 {
-    // Need install driver (i2c and i2s) firstly
-    // int ret = ut_i2c_init(1);
-    // TEST_ESP_OK((esp_err_t)ret);
-    int ret = ut_i2s_init(0);
-    // TEST_ESP_OK((esp_err_t)ret);
+    const size_t chunk_size = 4096;
+    uint8_t *chunk_buf      = (uint8_t *)malloc(chunk_size);
 
+    if (!chunk_buf) {
+        ESP_LOGE(TAG, "Failed to alloc chunk buffer");
+        g_is_recording = false;
+        vTaskDelete(NULL);
+        return;
+    }
 
-    // Do initialize of related interface: data_if, ctrl_if and gpio_if
+    g_record_actual_size = 0;
+
+    ESP_LOGI(TAG, "Recording task started...");
+
+    while (g_is_recording && (g_record_actual_size + chunk_size < g_record_max_size)) {
+        // 读取音频
+        esp_codec_dev_read(g_codec_dev, chunk_buf, chunk_size);
+
+        memcpy(g_record_buffer + g_record_actual_size, chunk_buf, chunk_size);
+        g_record_actual_size += chunk_size;
+
+        // task watchdog
+        // vTaskDelay(1);
+    }
+
+    ESP_LOGI(TAG, "Recording task finished. Size: %d", g_record_actual_size);
+
+    free(chunk_buf);
+    g_is_recording       = false;
+    g_record_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+int audio_init()
+{
+    if (g_codec_dev) return 0;  // Already init
+
+    ut_i2s_init();
+
+    // 1. Data Interface
     audio_codec_i2s_cfg_t i2s_cfg = {
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-        .rx_handle = i2s_keep[0]->rx_handle,
-        .tx_handle = i2s_keep[0]->tx_handle,
-#endif
+        .rx_handle = rx_handle,
+        .tx_handle = tx_handle,
     };
-    const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
-    // TEST_ASSERT_NOT_NULL(data_if);
+    g_data_if = audio_codec_new_i2s_data(&i2s_cfg);
 
+    // 2. Control Interface (I2C)
     audio_codec_i2c_cfg_t i2c_cfg = {.addr = ES8311_CODEC_DEFAULT_ADDR};
-    i2c_cfg.bus_handle = i2c_bus_get_internal_bus_handle(g_i2c_bus);
-    const audio_codec_ctrl_if_t *out_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
-    // TEST_ASSERT_NOT_NULL(out_ctrl_if);
+    i2c_cfg.bus_handle            = i2c_bus_get_internal_bus_handle(g_i2c_bus);
+    g_ctrl_if                     = audio_codec_new_i2c_ctrl(&i2c_cfg);
 
-    const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
-    // TEST_ASSERT_NOT_NULL(gpio_if);
+    // 3. GPIO Interface
+    g_gpio_if = audio_codec_new_gpio();
 
-    // New output codec interface
+    // 4. Codec Interface
     es8311_codec_cfg_t es8311_cfg = {
-        .ctrl_if    = out_ctrl_if,
-        .gpio_if    = gpio_if,
-        .codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH,
-        .pa_pin     = GPIO_NUM_NC,
+        .ctrl_if     = g_ctrl_if,
+        .gpio_if     = g_gpio_if,
+        .codec_mode  = ESP_CODEC_DEV_WORK_MODE_BOTH,
+        .pa_pin      = GPIO_NUM_NC,  // 手动控制 PA
         .pa_reverted = false,
-        .use_mclk   = true,
+        .use_mclk    = true,
     };
-    const audio_codec_if_t *out_codec_if = es8311_codec_new(&es8311_cfg);
-    // TEST_ASSERT_NOT_NULL(out_codec_if);
+    g_codec_if = es8311_codec_new(&es8311_cfg);
 
-    // New output codec device
+    // 5. Codec Device
     esp_codec_dev_cfg_t dev_cfg = {
         .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
-        .codec_if = out_codec_if,
-        .data_if  = data_if,
+        .codec_if = g_codec_if,
+        .data_if  = g_data_if,
     };
-    esp_codec_dev_handle_t codec_dev = esp_codec_dev_new(&dev_cfg);
-    // TEST_ASSERT_NOT_NULL(codec_dev);
+    g_codec_dev = esp_codec_dev_new(&dev_cfg);
 
-    ret = esp_codec_dev_set_out_vol(codec_dev, 50.0);
-    // TEST_ESP_OK(ret);
-    ret = esp_codec_dev_set_in_gain(codec_dev, 30.0);
-    // TEST_ESP_OK(ret);
+    // 默认配置
+    esp_codec_dev_set_out_vol(g_codec_dev, g_current_volume);
+    esp_codec_dev_set_in_gain(g_codec_dev, 30.0);
 
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = 16,
         .channel         = 1,
         .sample_rate     = 44100,
     };
-    ret = esp_codec_dev_open(codec_dev, &fs);
-    // TEST_ESP_OK(ret);
+    esp_codec_dev_open(g_codec_dev, &fs);
 
-    stop_watch_speaker_set(true);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    // 默认关闭 PA
+    audio_speaker_enable(false);
 
-    play_demo_file(codec_dev);
+    return 0;
+}
 
-    stop_watch_speaker_set(false);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-    
-    while (true)
-    {
-        // record 3 seconds and play
-        uint8_t *data = (uint8_t *)malloc(fs.sample_rate * fs.channel * (fs.bits_per_sample >> 3) * 5); // 5 seconds recording buffer
-        if (data == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate memory for recording");
-            break;
+void audio_deinit()
+{
+    // 1. 停止服务
+    audio_stop_web_server();
+
+    // 2. 停止录音任务
+    if (g_is_recording) {
+        g_is_recording = false;
+        while (g_record_task_handle != NULL) {
+            vTaskDelay(10 / portTICK_PERIOD_MS);
         }
-        
-        int buffer_size = fs.sample_rate * fs.channel * (fs.bits_per_sample >> 3) * 5; // 5 seconds recording total bytes
-        
-        ESP_LOGI(TAG, "Start recording 5 seconds...");
-        // read 3 seconds data at once
-        ret = esp_codec_dev_read(codec_dev, data, buffer_size);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Record failed: %d", ret);
-            break;
-        }
-        stop_watch_speaker_set(true);
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-        ESP_LOGI(TAG, "Record completed, start playing...");
-        ret = esp_codec_dev_write(codec_dev, data, buffer_size);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Playback failed: %d", ret);
-        }
-        ESP_LOGI(TAG, "Playback completed");
-        stop_watch_speaker_set(false);
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-        
-        free(data);
-        break;
     }
 
-    ret = esp_codec_dev_close(codec_dev);
-    // TEST_ESP_OK(ret);
+    // 3. 释放录音内存
+    if (g_record_buffer) {
+        free(g_record_buffer);
+        g_record_buffer = NULL;
+    }
 
-    esp_codec_dev_delete(codec_dev);
+    // 4. 销毁 Codec Device
+    if (g_codec_dev) {
+        esp_codec_dev_close(g_codec_dev);
+        esp_codec_dev_delete(g_codec_dev);
+        g_codec_dev = NULL;
+    }
 
-    // Delete codec interface
-    audio_codec_delete_codec_if(out_codec_if);
-    // Delete codec control interface
-    audio_codec_delete_ctrl_if(out_ctrl_if);
-    audio_codec_delete_gpio_if(gpio_if);
-    // Delete codec data interface
-    audio_codec_delete_data_if(data_if);
+    // 5. 销毁 Interfaces
+    if (g_codec_if) audio_codec_delete_codec_if(g_codec_if);
+    if (g_ctrl_if) audio_codec_delete_ctrl_if(g_ctrl_if);
+    if (g_gpio_if) audio_codec_delete_gpio_if(g_gpio_if);
+    if (g_data_if) audio_codec_delete_data_if(g_data_if);
 
-    // ut_i2c_deinit(1);
-    ut_i2s_deinit(0);
+    // 6. 销毁 I2S
+    ut_i2s_deinit();
+}
+
+// 写入静音数据以刷新缓冲区
+static void flush_audio_buffer()
+{
+    if (!g_codec_dev) return;
+    // 写入约 100ms 的静音数据
+    size_t silence_size = 44100 * 2 * 0.1;
+    uint8_t *silence    = (uint8_t *)calloc(1, silence_size);
+    if (silence) {
+        esp_codec_dev_write(g_codec_dev, silence, silence_size);
+        free(silence);
+    }
+}
+
+// 播放任务
+static void playback_task(void *arg)
+{
+    const size_t chunk_size = 2048;
+    g_is_playing            = true;
+    g_play_cursor           = 0;
+
+    ESP_LOGI(TAG, "Playback started, total: %d", g_play_total_len);
+
+    while (g_is_playing && g_play_cursor < g_play_total_len) {
+        size_t remain    = g_play_total_len - g_play_cursor;
+        size_t write_len = (remain > chunk_size) ? chunk_size : remain;
+
+        esp_err_t ret = esp_codec_dev_write(g_codec_dev, (void *)(g_play_ptr + g_play_cursor), write_len);
+
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Codec write failed");
+            break;
+        }
+
+        g_play_cursor += write_len;
+    }
+
+    flush_audio_buffer();
+
+    g_is_playing       = false;
+    g_play_task_handle = NULL;
+    ESP_LOGI(TAG, "Playback finished/stopped");
+    vTaskDelete(NULL);
+}
+
+int audio_play_start(const uint8_t *data, size_t size)
+{
+    if (!g_codec_dev) return -1;
+
+    if (g_is_playing) {
+        audio_play_stop();
+    }
+
+    g_play_ptr       = data;
+    g_play_total_len = size;
+    g_play_cursor    = 0;
+
+    BaseType_t ret = xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, NULL, 5, &g_play_task_handle, 1);
+    return (ret == pdPASS) ? 0 : -1;
+}
+
+void audio_play_stop()
+{
+    if (g_is_playing) {
+        g_is_playing = false;  // 通知任务退出循环
+        // 等待任务彻底结束
+        while (g_play_task_handle != NULL) {
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+    }
+}
+
+bool audio_is_playing()
+{
+    return g_is_playing;
+}
+
+void audio_get_progress(size_t *out_current, size_t *out_total)
+{
+    if (out_current) *out_current = g_play_cursor;
+    if (out_total) *out_total = g_play_total_len;
+}
+
+int audio_set_volume(int volume)
+{
+    if (!g_codec_dev) return -1;
+    g_current_volume = volume;
+    return esp_codec_dev_set_out_vol(g_codec_dev, (float)volume);
+}
+
+void audio_speaker_enable(bool enable)
+{
+    stop_watch_speaker_set(enable);
+}
+
+int audio_start_record()
+{
+    if (!g_codec_dev) return -1;
+    if (g_is_recording) return 0;  // 已经在录音
+
+    // 分配内存：30秒 * 44100 * 2 bytes = ~2.6MB
+    size_t max_seconds = 30;
+    g_record_max_size  = 44100 * 1 * 2 * max_seconds;
+
+    // 如果之前有内存，先释放
+    if (g_record_buffer) free(g_record_buffer);
+
+    g_record_buffer = (uint8_t *)malloc(g_record_max_size);
+    if (!g_record_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate %d bytes for record", g_record_max_size);
+        return -1;
+    }
+
+    g_is_recording = true;
+    xTaskCreatePinnedToCore(record_task_entry, "rec_task", 4096, NULL, 5, &g_record_task_handle, 1);
+
+    return 0;
+}
+
+int audio_stop_record(uint8_t **out_data, size_t *out_size)
+{
+    if (!g_is_recording && g_record_buffer == NULL) return -1;
+
+    g_is_recording = false;
+
+    // 等待任务结束
+    int timeout = 100;
+    while (g_record_task_handle != NULL && timeout > 0) {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+        timeout--;
+    }
+
+    if (out_data) *out_data = g_record_buffer;
+    if (out_size) *out_size = g_record_actual_size;
+
+    return 0;
+}
+
+bool audio_is_recording()
+{
+    return g_is_recording;
+}
+
+int audio_play_data(uint8_t *data, size_t size)
+{
+    if (!g_codec_dev || !data || size == 0) return -1;
+
+    return esp_codec_dev_write(g_codec_dev, data, size);
+}
+
+int audio_play_demo(uint8_t demo_type)
+{
+    if (demo_type == 0) {
+        esp_codec_dev_close(g_codec_dev);
+        esp_codec_dev_sample_info_t fs = {
+            .bits_per_sample = 16,
+            .channel         = 1,
+            .sample_rate     = 44100,
+        };
+        esp_codec_dev_open(g_codec_dev, &fs);
+        size_t len = _binary_demo_pcm_end - _binary_demo_pcm_start;
+        return audio_play_start(_binary_demo_pcm_start, len);
+    } else {
+        esp_codec_dev_close(g_codec_dev);
+        esp_codec_dev_sample_info_t fs = {
+            .bits_per_sample = 16,
+            .channel         = 2,
+            .sample_rate     = 44100,
+        };
+        esp_codec_dev_open(g_codec_dev, &fs);
+        size_t len = _binary_tone_wav_end - _binary_tone_wav_start - 44;
+        return audio_play_start(_binary_tone_wav_start + 44, len);
+    }
+}
+
+void audio_start_web_server()
+{
+    if (g_server) return;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.uri_match_fn   = httpd_uri_match_wildcard;
+
+    if (httpd_start(&g_server, &config) == ESP_OK) {
+        httpd_register_uri_handler(g_server, &download_uri);
+        ESP_LOGI(TAG, "Web Server Started");
+    } else {
+        ESP_LOGE(TAG, "Failed to start Web Server");
+    }
+}
+
+void audio_stop_web_server()
+{
+    if (g_server) {
+        httpd_stop(g_server);
+        g_server = NULL;
+    }
 }

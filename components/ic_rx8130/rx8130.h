@@ -32,5 +32,5 @@ protected:
     void writeRegister(uint8_t reg, uint8_t* buf, uint8_t len);
 
 private:
-    i2c_bus_device_handle_t _i2c_device_handle;
+    i2c_bus_device_handle_t _i2c_device_handle = NULL;
 }; 

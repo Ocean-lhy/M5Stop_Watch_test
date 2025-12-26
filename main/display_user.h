@@ -141,6 +141,7 @@ public:
 };
 
 extern M5StopWatch gfx;
+extern M5Canvas canvas;
 
 void display_init();
 void display_gfx_loop();

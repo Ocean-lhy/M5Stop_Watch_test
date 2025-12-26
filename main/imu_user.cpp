@@ -5,20 +5,20 @@
 #include "i2c_bus.h"
 #include "setting.h"
 
-static const char *TAG = "IMU_USER";
+static const char* TAG = "IMU_USER";
 
 // bmi270
 bmi270_tools* bmi270_sensor = nullptr;
-int accel_x = 0;
-int accel_y = 0;
-int accel_z = 0;
-int gyro_x = 0;
-int gyro_y = 0;
-int gyro_z = 0;
-int32_t mag_x = 0;
-int32_t mag_y = 0;
-int32_t mag_z = 0;
-bool mag_valid = false;
+int accel_x                 = 0;
+int accel_y                 = 0;
+int accel_z                 = 0;
+int gyro_x                  = 0;
+int gyro_y                  = 0;
+int gyro_z                  = 0;
+int32_t mag_x               = 0;
+int32_t mag_y               = 0;
+int32_t mag_z               = 0;
+bool mag_valid              = false;
 
 void bmi270_test(i2c_bus_handle_t i2c_bus)
 {
@@ -40,32 +40,22 @@ void bmi270_test(i2c_bus_handle_t i2c_bus)
     }
 
     uint8_t ct = 10;
-    while(ct--)
-    {
+    while (ct--) {
         bmi270_tools::sensor_data_t bmi270_data;
         ret = bmi270_sensor.get_sensor_data(bmi270_data);
-        if (ret == ESP_OK)
-        {
+        if (ret == ESP_OK) {
             ESP_LOGI(TAG, "BMI270数据获取成功-----------------");
-            if (bmi270_data.acc_valid)
-            {
+            if (bmi270_data.acc_valid) {
                 ESP_LOGI(TAG, "加速度计: %.3f, %.3f, %.3f", bmi270_data.acc_x, bmi270_data.acc_y, bmi270_data.acc_z);
-            }
-            else
-            {
+            } else {
                 ESP_LOGI(TAG, "BMI270加速度计数据无效");
             }
-            if (bmi270_data.gyr_valid)
-            {
+            if (bmi270_data.gyr_valid) {
                 ESP_LOGI(TAG, "陀螺仪: %.3f, %.3f, %.3f", bmi270_data.gyr_x, bmi270_data.gyr_y, bmi270_data.gyr_z);
-            }
-            else
-            {
+            } else {
                 ESP_LOGI(TAG, "BMI270陀螺仪数据无效");
             }
-        }
-        else
-        {
+        } else {
             ESP_LOGE(TAG, "BMI270数据获取失败: %s", esp_err_to_name(ret));
         }
         vTaskDelay(1000 / portTICK_PERIOD_MS);

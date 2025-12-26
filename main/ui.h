@@ -1,0 +1,90 @@
+#pragma once
+#include "display_user.h"
+#include "setting.h"
+#include "power_management.h"
+#include "touch_user.h"
+#include "audio_user.h"
+#include "imu_user.h"
+#include "rx8130.h"
+#include "esp_wifi.h"
+#include "wifi_manager.h"
+#include "esp_sntp.h"
+
+// 定义测试项结构
+struct TestItem {
+    const char* name;
+    void (*func)(void);
+};
+
+// UI主程序类
+class StopWatchApp {
+public:
+    void init();
+    void loop();
+
+    // 具体测试用例函数
+    static void test_i2c_rate();
+    static void test_grove_5v();
+    static void test_charge_switch();
+    static void test_status_show();
+    static void test_display_color();
+    static void test_touch_draw();
+    static void test_audio_record();
+    static void test_audio_play();
+    static void test_imu_data();
+    static void test_rtc_show();
+    static void test_vibration();
+    static void test_grove_io();
+    static void test_bottom_io();
+    static void test_ch442e();
+    static void test_wifi_scan();
+    static void test_wifi_distance();
+    static void test_l0_mode();
+    static void test_l1_mode();
+    static void test_l2_mode();
+    static void test_imu_wake();
+    static void test_imu_shutdown_wake();
+    static void test_rtc_wake();
+    static void test_rtc_shutdown_wake();
+    static void test_base_wake();
+    static void test_full_load();
+    static void test_aging();
+
+private:
+    // 基础UI功能
+    void drawHeader();
+    void drawFooter();
+    void drawMenu();
+    void updateInputs(bool updateTouch = false);
+
+    // 输入快照状态
+    struct InputState {
+        bool btnLeftClicked  = false;
+        bool btnRightClicked = false;
+        bool touchClicked    = false;
+        int touchX           = -1;
+        int touchY           = -1;
+    } _inputs;
+
+    // 内部物理追踪变量
+    struct PhysicalTracker {
+        int lastState                 = 1;
+        unsigned long lastTriggerTime = 0;
+    } _trackL, _trackR;
+
+    bool _isTouching = false;
+    int _touchStartX = -1;
+    int _touchStartY = -1;
+
+    // 菜单状态
+    int menu_index       = 0;
+    float scroll_offset  = 0.0f;  // 当前滚动的渲染偏移（平滑跟随 menu_index）
+    float target_offset  = 0.0f;  // 目标偏移
+    const float spring_k = 0.3f;  // 弹性系数 (0.1 - 0.5)，值越小越丝滑
+
+    // 工具函数
+    bool checkTouchRegion(int x1, int y1, int x2, int y2);  // 屏幕点击
+    void drawTitle(const char* title);
+};
+
+extern StopWatchApp app;

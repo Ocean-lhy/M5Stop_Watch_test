@@ -1,13 +1,21 @@
 #include "display_user.h"
 
 M5StopWatch gfx;
+M5Canvas canvas(&gfx);
 
 void display_init()
 {
     gfx.init();
-    gfx.fillScreen(TFT_BLUE);
+    gfx.fillScreen(TFT_BLACK);
     gfx.setTextColor(TFT_WHITE);
     gfx.setTextSize(2);
+    gfx.setFont(&fonts::efontCN_16);
+    canvas.createSprite(gfx.width(), gfx.height());
+    canvas.fillScreen(TFT_BLACK);
+    canvas.setTextColor(TFT_WHITE);
+    canvas.setTextSize(2);
+    canvas.setFont(&fonts::efontCN_16);
+    canvas.pushSprite(&gfx, 0, 0);
 }
 
 void display_gfx_loop()
@@ -26,7 +34,7 @@ void display_gfx_loop()
         gfx.fillScreen(rand());
         gfx.setRotation(gfx.getRotation() + 1);
         gfx.setCursor(112, 48);
-        gfx.println("Hello! Stop Watch!");
+        gfx.println("Stop Watch!");
     }
 
     // printf("M5StopWatch loop\n");fflush(stdout);
