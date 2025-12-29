@@ -13,6 +13,10 @@
 #include <arpa/inet.h>
 
 #include "circle_images.h"
+#include "esp_flash.h"
+#include "esp_chip_info.h"
+#include "spi_flash_chip_driver.h"
+#include "esp_partition.h"
 
 static const char *TAG = "UI";
 StopWatchApp app;
@@ -25,6 +29,8 @@ StopWatchApp app;
 #define WIFI_TEST_PASS  "M5NETWORKTEST"
 #define UDP_TARGET_IP   "192.168.3.5"
 #define UDP_TARGET_PORT 12345
+// title
+#define MAIN_TITLE "StopWatch Test v0.2"
 
 #define CYLINDER_POINTS 16  // 圆周采样点数
 
@@ -56,32 +62,20 @@ void init_stopwatch_geometry()
 
 // 测试列表定义
 std::vector<TestItem> testList = {
-    {"1. 设置I2C速率", StopWatchApp::test_i2c_rate},
-    {"2. 设置Grove 5V", StopWatchApp::test_grove_5v},
-    {"3. 设置充电", StopWatchApp::test_charge_switch},
-    {"4. 状态信息", StopWatchApp::test_status_show},
-    {"5. 显示测试", StopWatchApp::test_display_color},
-    {"6. 触摸测试", StopWatchApp::test_touch_draw},
-    {"7. 录音测试", StopWatchApp::test_audio_record},
-    {"8. 播放测试", StopWatchApp::test_audio_play},
-    {"9. IMU测试", StopWatchApp::test_imu_data},
-    {"10. RTC时间", StopWatchApp::test_rtc_show},
-    {"11. 振动测试", StopWatchApp::test_vibration},
-    {"12. Grove IO测试", StopWatchApp::test_grove_io},
-    {"13. 底部IO测试", StopWatchApp::test_bottom_io},
-    {"14. CH442E 设置", StopWatchApp::test_ch442e},
-    {"15. WiFi 扫描", StopWatchApp::test_wifi_scan},
-    {"16. WiFi 拉距", StopWatchApp::test_wifi_distance},
-    {"17. L0 关机", StopWatchApp::test_l0_mode},
-    {"18. L1 待机", StopWatchApp::test_l1_mode},
-    {"19. L2 睡眠", StopWatchApp::test_l2_mode},
-    {"20. IMU 唤醒 L2", StopWatchApp::test_imu_wake},
-    {"21. IMU 唤醒 L1", StopWatchApp::test_imu_shutdown_wake},
-    {"22. RTC 唤醒 L2", StopWatchApp::test_rtc_wake},
-    {"23. RTC 唤醒 L1", StopWatchApp::test_rtc_shutdown_wake},
-    {"24. 底座插入唤醒", StopWatchApp::test_base_wake},
-    {"25. 满载测试", StopWatchApp::test_full_load},
-    {"26. 老化测试", StopWatchApp::test_aging},
+    {"1. 设置I2C速率", StopWatchApp::test_i2c_rate},    {"2. 设置Grove 5V", StopWatchApp::test_grove_5v},
+    {"3. 设置充电", StopWatchApp::test_charge_switch},  {"4. 状态信息", StopWatchApp::test_status_show},
+    {"5. 显示测试", StopWatchApp::test_display_color},  {"6. 触摸测试", StopWatchApp::test_touch_draw},
+    {"7. 录音测试", StopWatchApp::test_audio_record},   {"8. 播放测试", StopWatchApp::test_audio_play},
+    {"9. IMU测试", StopWatchApp::test_imu_data},        {"10. RTC时间", StopWatchApp::test_rtc_show},
+    {"11. 振动测试", StopWatchApp::test_vibration},     {"12. Grove IO测试", StopWatchApp::test_grove_io},
+    {"13. 底部IO测试", StopWatchApp::test_bottom_io},   {"14. CH442E 设置", StopWatchApp::test_ch442e},
+    {"15. WiFi 扫描", StopWatchApp::test_wifi_scan},    {"16. WiFi 拉距", StopWatchApp::test_wifi_distance},
+    {"17. Flash 测试", StopWatchApp::test_flash},       {"18. L0 关机", StopWatchApp::test_l0_mode},
+    {"19. L1 待机", StopWatchApp::test_l1_mode},        {"20. L2 睡眠", StopWatchApp::test_l2_mode},
+    {"21. IMU 唤醒 L2", StopWatchApp::test_imu_wake},   {"22. IMU 唤醒 L1", StopWatchApp::test_imu_shutdown_wake},
+    {"23. RTC 唤醒 L2", StopWatchApp::test_rtc_wake},   {"24. RTC 唤醒 L1", StopWatchApp::test_rtc_shutdown_wake},
+    {"25. 底座插入唤醒", StopWatchApp::test_base_wake}, {"26. 满载测试", StopWatchApp::test_full_load},
+    {"27. 老化测试", StopWatchApp::test_aging},
 };
 
 void StopWatchApp::init()
@@ -130,17 +124,43 @@ void StopWatchApp::updateInputs(bool updateTouch)
     // 3. 处理触摸 (抬起触发模式)
     if (updateTouch) {
         cst820_loop();
-        bool currentDown     = (cst820_status == 0 || cst820_status == 2) && (cst820_x > 0 || cst820_y > 0);
+
+        // 判断当前帧是否有有效触摸 (0=按下, 2=移动/接触)
+        bool isContacting = (cst820_status == 0 || cst820_status == 2) && (cst820_x > 0 || cst820_y > 0);
+
         _inputs.touchClicked = false;
-        if (currentDown) {
-            _isTouching    = true;
-            _inputs.touchX = cst820_x;
-            _inputs.touchY = cst820_y;
+
+        if (isContacting) {
+            if (!_isTouching) {
+                // 这一帧有触摸，就将其设为滑动起点（Anchor Point）
+                _isTouching        = true;
+                _touchStartY       = cst820_y;
+                _startScrollOffset = scroll_offset;
+                _isDragging        = false;
+                ESP_LOGI(TAG, "Touch Start Detected at Y: %d", cst820_y);
+            } else {
+                // 如果已经在触摸中，持续计算偏移
+                float diffY = cst820_y - _touchStartY;
+
+                // 设定 15 像素的死区(Deadzone)，防止点击时的轻微抖动被识别为滑动
+                if (abs(diffY) > 15) {
+                    _isDragging = true;
+                }
+
+                // 实时更新位置，供 loop 使用
+                _inputs.touchX = cst820_x;
+                _inputs.touchY = cst820_y;
+            }
         } else {
-            if (_isTouching) {  // 松开
-                _inputs.touchClicked = true;
-                // X, Y 保持最后一次有效触点的位置供后续区域判断
+            // 状态从“有触摸”变为“无触摸” (抬起瞬间)
+            if (_isTouching) {
+                if (!_isDragging) {
+                    // 如果触摸期间没有产生足够位移，判定为点击
+                    _inputs.touchClicked = true;
+                }
                 _isTouching = false;
+                _isDragging = false;
+                ESP_LOGI(TAG, "Touch Released");
             }
         }
     }
@@ -157,38 +177,49 @@ void StopWatchApp::loop()
 {
     // 1. 处理输入
     updateInputs(true);
-    // 向上：点击屏幕上半部分
-    if (checkTouchRegion(0, 50, 466, 180)) {
-        menu_index--;
-        if (menu_index < 0) {
-            menu_index    = testList.size() - 1;
-            scroll_offset = menu_index + 1;  // 跨度平滑处理
-        }
-    }
-    // 向下：左键 或 点击下半部分
-    if (_inputs.btnLeftClicked || checkTouchRegion(0, 280, 466, 410)) {
-        menu_index++;
-        if (menu_index >= testList.size()) {
-            menu_index    = 0;
-            scroll_offset = -1;  // 跨度平滑处理
-        }
+    int item_h      = 30;  // 每一行的高度
+    int total_items = testList.size();
+
+    if (_isDragging) {
+        // 1. 滑动中：scroll_offset 实时跟随手指位置
+        float diffY   = _inputs.touchY - _touchStartY;
+        scroll_offset = _startScrollOffset - (diffY / (float)item_h);
+
+        // 计算当前选中的菜单索引（四舍五入到最近的项）
+        menu_index = (int)round(scroll_offset);
+    } else {
+        // 2. 未滑动（或松手后）：执行平滑吸附动画
+        // 按钮点击切换
+        if (checkTouchRegion(0, 50, 466, 180)) menu_index--;
+        if (_inputs.btnLeftClicked || checkTouchRegion(0, 280, 466, 410)) menu_index++;
+
+        // 弹性追踪：scroll_offset 向整数的 menu_index 靠近
+        scroll_offset += (menu_index - scroll_offset) * spring_k;
     }
 
-    // 2. 核心动画：平滑追踪
-    // 每一帧 scroll_offset 都会向 menu_index 靠近
-    scroll_offset += (menu_index - scroll_offset) * spring_k;
+    // 3. 处理循环逻辑，防止 scroll_offset 变成极大的正数或负数
+    if (scroll_offset < 0) {
+        scroll_offset += total_items;
+        menu_index += total_items;
+        _startScrollOffset += total_items;  // 如果在滑动中跳变，需同步更新起始偏移
+    } else if (scroll_offset >= total_items) {
+        scroll_offset -= total_items;
+        menu_index -= total_items;
+        _startScrollOffset -= total_items;
+    }
 
-    // 3. 渲染
+    // 4. 渲染
     canvas.fillScreen(TFT_BLACK);
     drawHeader();
     drawFooter();
     drawMenu();  // 内部使用 scroll_offset
 
-    // 点击中间或者右键进入测试
-    if (_inputs.btnRightClicked || checkTouchRegion(0, 181, 466, 279)) {
-        if (testList[menu_index].func) {
+    // 5. 确认进入
+    if (_inputs.btnRightClicked || (!_isDragging && checkTouchRegion(0, 181, 466, 279))) {
+        int final_idx = (menu_index % total_items + total_items) % total_items;
+        if (testList[final_idx].func) {
             canvas.fillScreen(TFT_BLACK);
-            testList[menu_index].func();
+            testList[final_idx].func();
             canvas.fillScreen(TFT_BLACK);
         }
     }
@@ -202,7 +233,7 @@ void StopWatchApp::drawHeader()
     canvas.setTextSize(1);
     canvas.setTextColor(TFT_WHITE, TFT_BLACK);
     canvas.setTextDatum(top_center);
-    canvas.drawString("StopWatch Test v0.1", 233, 30);
+    canvas.drawString(MAIN_TITLE, 233, 30);
     canvas.drawLine(50, 50, 416, 50, TFT_DARKGRAY);
 }
 
@@ -439,7 +470,7 @@ void StopWatchApp::test_status_show()
 void StopWatchApp::test_display_color()
 {
     int colors[] = {TFT_WHITE, TFT_RED, TFT_GREEN, TFT_BLUE, TFT_BLACK, TFT_WHITE};
-    int c_idx = 0;
+    int c_idx    = 0;
     gfx.fillScreen(colors[c_idx]);
 
     while (1) {
@@ -1583,6 +1614,281 @@ void StopWatchApp::test_base_wake()
         vTaskDelay(1000);
     }
     wakeup_test(WakeupDevice::PORT_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+}
+
+// 17. Flash Test
+void StopWatchApp::test_flash()
+{
+    app.drawTitle(testList[16].name);
+    canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+    canvas.setTextDatum(top_center);
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+
+    int y_pos  = 70;
+    int line_h = 25;
+
+    canvas.drawString("正在读取Flash信息...", 233, y_pos);
+    canvas.pushSprite(&gfx, 0, 0);
+
+    // 获取芯片信息
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+
+    // 获取Flash大小
+    uint32_t flash_size = 0;
+    esp_flash_get_size(NULL, &flash_size);
+
+    // 获取Flash ID
+    uint32_t flash_id = 0;
+    esp_flash_read_id(NULL, &flash_id);
+
+    // 获取Flash芯片名称
+    const char *flash_name = "Unknown";
+    if (esp_flash_default_chip && esp_flash_default_chip->chip_drv) {
+        flash_name = esp_flash_default_chip->chip_drv->name;
+    }
+
+    // 显示Flash信息
+    canvas.fillRect(0, 55, 466, 355, TFT_BLACK);
+    y_pos = 70;
+
+    canvas.setTextColor(TFT_CYAN, TFT_BLACK);
+    canvas.drawString("=== Flash 信息 ===", 233, y_pos);
+    y_pos += line_h + 5;
+
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    char buf[64];
+
+    sprintf(buf, "芯片: %s", CONFIG_IDF_TARGET);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "Flash 大小: %lu MB", flash_size / (1024 * 1024));
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "Flash ID: 0x%08lX", flash_id);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "制造商: 0x%02lX", flash_id & 0xFF);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "Flash 型号: %s", flash_name);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "类型: %s", (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "Embedded" : "External");
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "模式: %s", CONFIG_ESPTOOLPY_FLASHMODE);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "速度: %s Hz", CONFIG_ESPTOOLPY_FLASHFREQ);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "PSRAM: %.2f KB / %.2f KB", (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024,
+            (double)heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += line_h;
+
+    sprintf(buf, "Internal RAM: %.2f KB / %.2f KB", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024,
+            (double)heap_caps_get_total_size(MALLOC_CAP_INTERNAL) / 1024);
+    canvas.drawString(buf, 233, y_pos);
+    y_pos += (line_h + 10);
+
+    // Flash读写测试选项
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString("左键: 读写速度测试", 233, y_pos);
+    y_pos += line_h;
+
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString("右键: 退出", 233, y_pos);
+
+    canvas.pushSprite(&gfx, 0, 0);
+
+    // 等待按键
+    while (1) {
+        app.updateInputs(false);
+
+        if (app._inputs.btnLeftClicked) {
+            // 查找测试分区
+            const esp_partition_t *test_partition =
+                esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0xFF, "test");
+
+            if (!test_partition) {
+                canvas.fillRect(0, 55, 466, 355, TFT_BLACK);
+                canvas.setTextColor(TFT_RED, TFT_BLACK);
+                canvas.setTextDatum(middle_center);
+                canvas.drawString("未找到测试分区!", 233, 200);
+                canvas.drawString("请检查 partitions.csv", 233, 230);
+                canvas.pushSprite(&gfx, 0, 0);
+                vTaskDelay(3000);
+                continue;
+            }
+
+            // 执行读写速度测试
+            canvas.fillRect(0, 55, 466, 355, TFT_BLACK);
+            y_pos = 70;
+            canvas.setTextDatum(top_center);
+
+            canvas.setTextColor(TFT_CYAN, TFT_BLACK);
+            canvas.drawString("=== Flash 读写测试 ===", 233, y_pos);
+            y_pos += line_h + 5;
+
+            canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+            sprintf(buf, "测试分区: 0x%lX", test_partition->address);
+            canvas.drawString(buf, 233, y_pos);
+            y_pos += line_h;
+
+            sprintf(buf, "分区大小: %lu KB", test_partition->size / 1024);
+            canvas.drawString(buf, 233, y_pos);
+            y_pos += line_h + 5;
+
+            canvas.drawString("擦除分区...", 233, y_pos);
+            canvas.pushSprite(&gfx, 0, 0);
+
+            // 擦除测试分区
+            uint32_t erase_start = esp_timer_get_time();
+            esp_err_t err        = esp_partition_erase_range(test_partition, 0, test_partition->size);
+            uint32_t erase_time  = esp_timer_get_time() - erase_start;
+
+            if (err != ESP_OK) {
+                canvas.fillRect(0, 55, 466, 355, TFT_BLACK);
+                canvas.setTextColor(TFT_RED, TFT_BLACK);
+                canvas.drawString("擦除失败!", 233, 200);
+                canvas.pushSprite(&gfx, 0, 0);
+                vTaskDelay(2000);
+                continue;
+            }
+
+            // 准备测试数据
+            const size_t test_size = 4096;  // 4KB
+            const int test_count   = 100;
+            uint8_t *write_buf     = (uint8_t *)malloc(test_size);
+            uint8_t *read_buf      = (uint8_t *)malloc(test_size);
+
+            if (write_buf && read_buf) {
+                // 填充测试数据
+                for (int i = 0; i < test_size; i++) {
+                    write_buf[i] = (i & 0xFF) ^ 0xAA;
+                }
+
+                canvas.fillRect(0, 55, 466, 355, TFT_BLACK);
+                y_pos = 70;
+                canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+                canvas.drawString("写入测试中...", 233, y_pos);
+                canvas.pushSprite(&gfx, 0, 0);
+
+                // 写入速度测试
+                uint32_t write_start = esp_timer_get_time();
+                for (int i = 0; i < test_count; i++) {
+                    esp_partition_write(test_partition, i * test_size, write_buf, test_size);
+                }
+                uint32_t write_time = esp_timer_get_time() - write_start;
+
+                canvas.drawString("读取测试中...", 233, y_pos + line_h);
+                canvas.pushSprite(&gfx, 0, 0);
+
+                // 读取速度测试
+                uint32_t read_start = esp_timer_get_time();
+                for (int i = 0; i < test_count; i++) {
+                    esp_partition_read(test_partition, i * test_size, read_buf, test_size);
+                }
+                uint32_t read_time = esp_timer_get_time() - read_start;
+
+                // 数据验证
+                bool verify_ok = true;
+                esp_partition_read(test_partition, 0, read_buf, test_size);
+                for (int i = 0; i < test_size; i++) {
+                    if (read_buf[i] != write_buf[i]) {
+                        verify_ok = false;
+                        break;
+                    }
+                }
+
+                // 计算速度
+                float write_speed = (test_size * test_count / 1024.0f) / (write_time / 1000000.0f);  // KB/s
+                float read_speed  = (test_size * test_count / 1024.0f) / (read_time / 1000000.0f);   // KB/s
+                float erase_speed = (test_partition->size / 1024.0f) / (erase_time / 1000000.0f);    // KB/s
+
+                // 显示测试结果
+                canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
+                y_pos = 70;
+
+                canvas.setTextColor(TFT_CYAN, TFT_BLACK);
+                canvas.drawString("=== 测试结果 ===", 233, y_pos);
+                y_pos += line_h + 5;
+
+                canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+                sprintf(buf, "测试块: %d 字节 x %d", test_size, test_count);
+                canvas.drawString(buf, 233, y_pos);
+                y_pos += line_h + 5;
+
+                // 擦除结果
+                canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+                sprintf(buf, "擦除: %lu ms", erase_time / 1000);
+                canvas.drawString(buf, 233, y_pos);
+                y_pos += line_h;
+                sprintf(buf, "速度: %.2f KB/s", erase_speed);
+                canvas.drawString(buf, 233, y_pos);
+                y_pos += line_h + 5;
+
+                // 写入结果
+                canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+                sprintf(buf, "写入: %lu ms", write_time / 1000);
+                canvas.drawString(buf, 233, y_pos);
+                y_pos += line_h;
+                sprintf(buf, "速度: %.2f KB/s (%.2f MB/s)", write_speed, write_speed / 1024.0f);
+                canvas.drawString(buf, 233, y_pos);
+                y_pos += line_h + 5;
+
+                // 读取结果
+                canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+                sprintf(buf, "读取: %lu ms", read_time / 1000);
+                canvas.drawString(buf, 233, y_pos);
+                y_pos += line_h;
+                sprintf(buf, "速度: %.2f KB/s (%.2f MB/s)", read_speed, read_speed / 1024.0f);
+                canvas.drawString(buf, 233, y_pos);
+                y_pos += line_h + 5;
+
+                // 验证结果
+                if (verify_ok) {
+                    canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+                    canvas.drawString("数据验证: 通过", 233, y_pos);
+                } else {
+                    canvas.setTextColor(TFT_RED, TFT_BLACK);
+                    canvas.drawString("数据验证: 失败", 233, y_pos);
+                }
+                y_pos += line_h + 10;
+
+                canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+                canvas.drawString("按右键退出", 233, y_pos);
+
+                free(write_buf);
+                free(read_buf);
+            } else {
+                canvas.fillRect(0, 55, 466, 355, TFT_BLACK);
+                canvas.setTextColor(TFT_RED, TFT_BLACK);
+                canvas.drawString("内存不足！", 233, 200);
+                if (write_buf) free(write_buf);
+                if (read_buf) free(read_buf);
+            }
+
+            canvas.pushSprite(&gfx, 0, 0);
+        }
+
+        if (app._inputs.btnRightClicked) {
+            return;
+        }
+
+        vTaskDelay(10);
+    }
 }
 
 // 22. Full Load

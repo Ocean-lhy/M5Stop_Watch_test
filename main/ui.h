@@ -49,6 +49,7 @@ public:
     static void test_base_wake();
     static void test_full_load();
     static void test_aging();
+    static void test_flash();
 
 private:
     // 基础UI功能
@@ -74,7 +75,9 @@ private:
 
     bool _isTouching = false;
     int _touchStartX = -1;
-    int _touchStartY = -1;
+    float _touchStartY = 0;      // 触摸起始点 Y
+    float _startScrollOffset = 0; // 触摸起始时的滚动偏移
+    bool  _isDragging = false;    // 是否正在拖拽
 
     // 菜单状态
     int menu_index       = 0;

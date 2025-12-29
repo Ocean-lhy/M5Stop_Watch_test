@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "power_management.h"
 #include "tools.h"
 
@@ -382,12 +383,14 @@ int audio_start_record()
     // 如果之前有内存，先释放
     if (g_record_buffer) free(g_record_buffer);
 
-    g_record_buffer = (uint8_t *)malloc(g_record_max_size);
+    g_record_buffer = (uint8_t *)heap_caps_malloc(g_record_max_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!g_record_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate %d bytes for record", g_record_max_size);
+        ESP_LOGE(TAG, "Failed to allocate %d bytes for record from PSRAM", g_record_max_size);
+        ESP_LOGE(TAG, "Available PSRAM: %d bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         return -1;
     }
 
+    ESP_LOGI(TAG, "Successfully allocated %d bytes from PSRAM", g_record_max_size);
     g_is_recording = true;
     xTaskCreatePinnedToCore(record_task_entry, "rec_task", 4096, NULL, 5, &g_record_task_handle, 1);
 
