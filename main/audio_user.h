@@ -12,6 +12,18 @@
 extern "C" {
 #endif
 
+typedef enum {
+    AUDIO_DEMO_PIANO = 0,
+    AUDIO_DEMO_TONE = 1,
+    AUDIO_DEMO_HOTEL_CALIFORNIA = 2,
+    AUDIO_DEMO_DEAR_1 = 3,
+    AUDIO_DEMO_DEAR_2 = 4,
+    AUDIO_VOICE_START = 5,
+    AUDIO_VOICE_SWITCH = 6,
+    AUDIO_VOICE_CHECK = 7,
+    AUDIO_TYPE_COUNT = 8,
+} audio_type_t;
+
 // 初始化音频驱动 (I2S, Codec)
 int audio_init();
 
@@ -34,7 +46,7 @@ int audio_stop_record(uint8_t **out_data, size_t *out_size);
 int audio_play_data(uint8_t *data, size_t size);
 
 // 播放内置 Demo
-int audio_play_demo(uint8_t demo_type = 0);
+int audio_play_demo(audio_type_t demo_type);
 
 // 控制功放开关
 void audio_speaker_enable(bool enable);
@@ -72,6 +84,13 @@ bool audio_is_playing();
  * @param out_total 总字节数
  */
 void audio_get_progress(size_t *out_current, size_t *out_total);
+
+/**
+ * @brief 获取当前播放的采样率和通道数
+ * @param rate 采样率
+ * @param ch 通道数
+ */
+void audio_get_active_info(uint32_t *rate, uint8_t *ch);
 
 #ifdef __cplusplus
 }

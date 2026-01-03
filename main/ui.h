@@ -81,6 +81,7 @@ private:
 
     // 菜单状态
     int menu_index       = 0;
+    int _last_menu_index = 0;
     float scroll_offset  = 0.0f;  // 当前滚动的渲染偏移（平滑跟随 menu_index）
     float target_offset  = 0.0f;  // 目标偏移
     const float spring_k = 0.3f;  // 弹性系数 (0.1 - 0.5)，值越小越丝滑

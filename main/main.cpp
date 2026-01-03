@@ -106,8 +106,20 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Init Display");
     display_init();
 
+    ESP_LOGI(TAG, "Init Audio");
+    audio_init();
+    audio_set_volume(100);
+    audio_speaker_enable(true);
+
+    ESP_LOGI(TAG, "Init Motor");
+    motor_init();
+
     ESP_LOGI(TAG, "Init Touch");
     cst820_init(g_i2c_bus);
+
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+    audio_play_demo(AUDIO_VOICE_START);
+    trigger_motor(300, 50);
 
     app.init();
 

@@ -16,4 +16,8 @@ extern i2c_bus_device_handle_t i2c_device_all[0xFF];  // I2C device handle
 void register_i2c_bus_device();
 void scan_i2c_bus_device();
 
+// Motor
+void motor_init();
+void trigger_motor(uint32_t duration_ms, uint8_t duty_percentage);
+
 #endif  // TOOLS_H

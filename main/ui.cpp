@@ -7,6 +7,7 @@
 #include "bmi270_tools.h"
 #include "driver/ledc.h"
 #include "esp_log.h"
+#include "tools.h"
 
 #include "wifi_manager.h"
 #include "lwip/sockets.h"
@@ -103,7 +104,7 @@ void StopWatchApp::updateInputs(bool updateTouch)
     if (_trackL.lastState == 1 && stateL == 0) {  // 下降沿
         _inputs.btnLeftClicked  = true;
         _trackL.lastTriggerTime = now;
-    } else if (stateL == 0 && (now - _trackL.lastTriggerTime >= 400)) {  // 长按自增
+    } else if (stateL == 0 && (now - _trackL.lastTriggerTime >= 200)) {  // 长按自增
         _inputs.btnLeftClicked  = true;
         _trackL.lastTriggerTime = now;
     }
@@ -208,6 +209,12 @@ void StopWatchApp::loop()
         _startScrollOffset -= total_items;
     }
 
+    if (menu_index != _last_menu_index) {
+        _last_menu_index = menu_index;
+        trigger_motor(30, 60);
+        audio_play_demo(AUDIO_VOICE_SWITCH);
+    }
+
     // 4. 渲染
     canvas.fillScreen(TFT_BLACK);
     drawHeader();
@@ -216,6 +223,7 @@ void StopWatchApp::loop()
 
     // 5. 确认进入
     if (_inputs.btnRightClicked || (!_isDragging && checkTouchRegion(0, 181, 466, 279))) {
+        audio_play_demo(AUDIO_VOICE_CHECK);
         int final_idx = (menu_index % total_items + total_items) % total_items;
         if (testList[final_idx].func) {
             canvas.fillScreen(TFT_BLACK);
@@ -674,7 +682,8 @@ void StopWatchApp::test_audio_record()
         vTaskDelay(20);
     }
 
-    audio_deinit();  // 停止 Server，停止录音任务，释放 Buffer，关闭 I2S
+    audio_deinit();
+    audio_init();
 }
 
 // 8. Audio Play
@@ -692,7 +701,7 @@ void StopWatchApp::test_audio_play()
     const int vol_options[] = {0, 25, 50, 75, 100};
     int vol_idx             = 2;  // 默认 50%
     bool pa_enable          = true;
-    uint8_t play_type_idx   = 0;  // 默认 0
+    uint8_t play_type_idx   = 0;  // 默认 0, 0: 钢琴, 1: 音频, 2: 加州旅馆, 3: DEAR 1, 4: DEAR 2
 
     // 初始化音频
     audio_init();
@@ -727,12 +736,12 @@ void StopWatchApp::test_audio_play()
                         if (audio_is_playing()) {
                             audio_play_stop();
                         } else {
-                            audio_play_demo(play_type_idx);
+                            audio_play_demo(static_cast<audio_type_t>(play_type_idx));
                         }
                         break;
                     case ITEM_EXIT:
                         audio_play_stop();
-                        audio_deinit();
+                        // audio_deinit();
                         return;  // 退出函数
                 }
             }
@@ -762,7 +771,7 @@ void StopWatchApp::test_audio_play()
             // --- 播放音频设置逻辑 ---
             if (app._inputs.btnLeftClicked) {
                 // 左键：循环切换播放类型
-                play_type_idx = (play_type_idx + 1) % 2;
+                play_type_idx = (play_type_idx + 1) % 5;
             }
             if (app._inputs.btnRightClicked) {
                 // 右键：确认并返回
@@ -822,7 +831,17 @@ void StopWatchApp::test_audio_play()
             canvas.setTextColor(TFT_WHITE, TFT_BLACK);
         canvas.drawString("3. 选择音频", left_margin, start_y + line_h * 2);
         canvas.setTextDatum(middle_right);
-        canvas.drawString(play_type_idx == 0 ? "[ 歌曲 ]" : "[ 音频 ]", right_val_x, start_y + line_h * 2);
+        if (play_type_idx == 0) {
+            canvas.drawString("[ 钢琴 ]", right_val_x, start_y + line_h * 2);
+        } else if (play_type_idx == 1) {
+            canvas.drawString("[ 音频 ]", right_val_x, start_y + line_h * 2);
+        } else if (play_type_idx == 2) {
+            canvas.drawString("[ 加州旅馆 ]", right_val_x, start_y + line_h * 2);
+        } else if (play_type_idx == 3) {
+            canvas.drawString("[ DEAR 1 ]", right_val_x, start_y + line_h * 2);
+        } else if (play_type_idx == 4) {
+            canvas.drawString("[ DEAR 2 ]", right_val_x, start_y + line_h * 2);
+        }
 
         // Item 4: 播放/暂停
         canvas.setTextDatum(middle_left);
@@ -865,29 +884,37 @@ void StopWatchApp::test_audio_play()
         if (is_playing) {
             size_t curr = 0, total = 1;
             audio_get_progress(&curr, &total);
-            if (total == 0) total = 1;  // 防止除零
-
+            if (total == 0) total = 1;
+        
+            // 获取当前正在播放的真实参数
+            uint32_t current_rate;
+            uint8_t current_ch;
+            audio_get_active_info(&current_rate, &current_ch);
+        
+            // 动态计算每秒字节数 (16bit = 2 bytes)
+            uint32_t bytes_per_sec = current_rate * current_ch * 2;
+        
             int bar_x = 40;
             int bar_y = 330;
             int bar_w = 386;
             int bar_h = 10;
-
-            // 绘制外框
+        
+            // 绘制进度条
             canvas.drawRect(bar_x, bar_y, bar_w, bar_h, TFT_WHITE);
-
-            // 绘制填充
-            float pct  = (float)curr / (float)total;
+            float pct = (float)curr / (float)total;
+            if (pct > 1.0f) pct = 1.0f;
             int fill_w = (int)(bar_w * pct);
             canvas.fillRect(bar_x + 1, bar_y + 1, fill_w - 2, bar_h - 2, TFT_GREEN);
-
-            // 绘制时间文本
-            // 假设 44100Hz, 16bit, Mono => 88200 bytes/sec
-            int audio_bytes_per_sec = play_type_idx == 0 ? 88200 : 176400;
-            int total_sec           = total / audio_bytes_per_sec;
-            int curr_sec            = curr / audio_bytes_per_sec;
+        
+            // 绘制时间：总秒数和当前秒数
+            int total_sec = total / bytes_per_sec;
+            int curr_sec  = curr / bytes_per_sec;
+        
             char time_buf[32];
-            sprintf(time_buf, "%02d:%02d / %02d:%02d", curr_sec / 60, curr_sec % 60, total_sec / 60, total_sec % 60);
-
+            sprintf(time_buf, "%02d:%02d / %02d:%02d", 
+                    curr_sec / 60, curr_sec % 60, 
+                    total_sec / 60, total_sec % 60);
+        
             canvas.setTextDatum(bottom_right);
             canvas.setTextColor(TFT_WHITE, TFT_BLACK);
             canvas.drawString(time_buf, bar_x + bar_w, bar_y - 5);
@@ -1913,12 +1940,12 @@ void StopWatchApp::test_full_load()
         if (app._inputs.btnRightClicked) {
             io_expander.setPwmDuty(PY32_MOTOR_PWM_CHANNEL, 0, false, true);
             audio_play_stop();
-            audio_deinit();
+            // audio_deinit();
             return;
         }
         // 循环播放音频
         if (!audio_is_playing()) {
-            audio_play_demo();
+            audio_play_demo(audio_type_t::AUDIO_DEMO_PIANO);
         }
         // 3秒扫描一次WIFI
         if (getMillis() - last_time > 3000) {

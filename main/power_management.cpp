@@ -34,7 +34,7 @@ void pmic_init()
     // pm1_pwr_set_cfg(PM1_PWR_CFG_5V_INOUT, 0, NULL);
 
     // set LED control enable
-    pm1_pwr_set_cfg(PM1_PWR_CFG_LED_CONTROL, PM1_PWR_CFG_LED_CONTROL, NULL);
+    pm1_pwr_set_cfg(PM1_PWR_CFG_LED_CONTROL, 0, NULL);
 
     // set charge enable or disable, this setting will keep working after power off
     pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, PM1_PWR_CFG_CHG_EN, NULL);
@@ -136,9 +136,6 @@ void py32_io_expander_init()
     io_expander.digitalWrite(PY32_AU_EN_PIN, 1);
 
     io_expander.setPwmFrequency(5000);
-    io_expander.setPwmDuty(PY32_MOTOR_PWM_CHANNEL, 50, false, true);
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    io_expander.setPwmDuty(PY32_MOTOR_PWM_CHANNEL, 0, false, true);
 
     gpio_set_direction(SPK_PA_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(SPK_PA_PIN, 0);
