@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "power_management.h"
 #include "tools.h"
+#include <math.h>
 
 // 音频1
 extern "C" const uint8_t _binary_demo_pcm_start[] asm("_binary_demo_pcm_start");
@@ -18,16 +19,9 @@ extern "C" const uint8_t _binary_tone_wav_start[] asm("_binary_tone_wav_start");
 extern "C" const uint8_t _binary_tone_wav_end[] asm("_binary_tone_wav_end");
 
 // 音频3
-extern "C" const uint8_t _binary_hotel_california_wav_start[] asm("_binary_hotel_california_wav_start");
-extern "C" const uint8_t _binary_hotel_california_wav_end[] asm("_binary_hotel_california_wav_end");
+extern "C" const uint8_t _binary_dear_wav_start[] asm("_binary_DEAR_wav_start");
+extern "C" const uint8_t _binary_dear_wav_end[] asm("_binary_DEAR_wav_end");
 
-// 音频4
-extern "C" const uint8_t _binary_dear_1_wav_start[] asm("_binary_DEAR_1_wav_start");
-extern "C" const uint8_t _binary_dear_1_wav_end[] asm("_binary_DEAR_1_wav_end");
-
-// 音频5
-extern "C" const uint8_t _binary_dear_2_wav_start[] asm("_binary_DEAR_2_wav_start");
-extern "C" const uint8_t _binary_dear_2_wav_end[] asm("_binary_DEAR_2_wav_end");
 
 // 音效
 extern "C" const uint8_t voice_start_start[] asm("_binary_voice_start_wav_start");
@@ -71,7 +65,8 @@ typedef struct {
     size_t size;
     uint32_t sample_rate;
     uint8_t channels;
-    bool interrupt; // 是否立即中断当前播放
+    bool interrupt;
+    bool need_fft;
 } audio_msg_t;
 
 static QueueHandle_t xAudioQueue = NULL;
@@ -82,12 +77,45 @@ static uint8_t g_active_channels     = 1;
 // I2S 配置
 #define I2S_PORT I2S_NUM_0
 
+#define VISUALIZATION_BUFF_SIZE 2048
+static int16_t g_vis_raw_buff[VISUALIZATION_BUFF_SIZE];
+static int g_vis_raw_ptr = 0;
+
 // ================= 内部辅助函数 =================
+
+static void update_visualization_buffer(const uint8_t* data, size_t len) {
+    const int16_t* pcm = (const int16_t*)data;
+    int samples = len / 2; // 16bit = 2 bytes per sample
+    
+    for (int i = 0; i < samples; i++) {
+        g_vis_raw_buff[g_vis_raw_ptr] = pcm[i];
+        g_vis_raw_ptr++;
+        if (g_vis_raw_ptr >= VISUALIZATION_BUFF_SIZE) {
+            g_vis_raw_ptr = 0;
+        }
+    }
+}
+
+void audio_get_fft_input(float *out_buff, int count) {
+    if (count > VISUALIZATION_BUFF_SIZE) count = VISUALIZATION_BUFF_SIZE;
+    
+    int read_ptr = g_vis_raw_ptr - count;
+    if (read_ptr < 0) read_ptr += VISUALIZATION_BUFF_SIZE;
+    
+    for (int i = 0; i < count; i++) {
+        int16_t raw = g_vis_raw_buff[read_ptr];
+        // 归一化到 -1.0 ~ 1.0 范围
+        out_buff[i] = (float)raw / 32768.0f;
+        
+        read_ptr++;
+        if (read_ptr >= VISUALIZATION_BUFF_SIZE) read_ptr = 0;
+    }
+}
 
 static void audio_main_task(void *arg) {
     audio_msg_t msg;
     const size_t chunk_size = 1024;
-    const size_t silence_size = 44100 * 1 * 0.1; 
+    const size_t silence_size = 44100 * 2 * 0.1; 
     uint8_t *silence_buf = (uint8_t *)calloc(1, silence_size); // 预分配静音数据
     uint32_t current_rate = 0;
     uint8_t current_ch = 0;
@@ -99,6 +127,7 @@ static void audio_main_task(void *arg) {
 
             // 2. 配置 Codec
             if (need_reconfig) {
+                esp_codec_dev_close(g_codec_dev);
                 esp_codec_dev_sample_info_t fs = {
                     .bits_per_sample = 16,
                     .channel         = msg.channels,
@@ -114,10 +143,6 @@ static void audio_main_task(void *arg) {
             g_play_total_len     = msg.size;
             g_play_cursor        = 0;
             g_is_playing         = true;
-            
-            // ESP_LOGI(TAG, "Playing: Rate=%ld, Ch=%d", g_active_sample_rate, g_active_channels);
-
-            // audio_speaker_enable(true);
 
             // 3. 播放循环
             while (g_play_cursor < g_play_total_len && g_is_playing) {
@@ -129,6 +154,10 @@ static void audio_main_task(void *arg) {
 
                 size_t remain    = g_play_total_len - g_play_cursor;
                 size_t write_len = (remain > chunk_size) ? chunk_size : remain;
+
+                if (msg.need_fft) {
+                    update_visualization_buffer((const uint8_t*)(msg.data + g_play_cursor), write_len);
+                }
                 
                 esp_codec_dev_write(g_codec_dev, (void *)(msg.data + g_play_cursor), write_len);
                 g_play_cursor += write_len;
@@ -136,8 +165,8 @@ static void audio_main_task(void *arg) {
 
             // 4. 消除杂音
             esp_codec_dev_write(g_codec_dev, silence_buf, silence_size);
-            // audio_speaker_enable(false);
             g_is_playing = false;
+            g_play_cursor = 0;
         }
     }
 }
@@ -145,6 +174,30 @@ static void audio_main_task(void *arg) {
 void audio_get_active_info(uint32_t *rate, uint8_t *ch) {
     if (rate) *rate = g_active_sample_rate;
     if (ch) *ch = g_active_channels;
+}
+
+void audio_get_record_buffer(uint8_t **out_data, size_t *out_size)
+{
+    if (out_data) *out_data = g_record_buffer;
+    if (out_size) *out_size = g_record_actual_size;
+}
+
+int audio_play_raw_async(const uint8_t* data, size_t size, uint32_t rate, uint8_t ch) {
+    if (data == NULL || size == 0) return -1;
+    
+    audio_speaker_enable(true); 
+
+    audio_msg_t msg = {
+        .data = data,
+        .size = size,
+        .sample_rate = rate,
+        .channels = ch,
+        .interrupt = true,
+        .need_fft = true,
+    };
+    g_is_playing = true;
+    xQueueOverwrite(xAudioQueue, &msg);
+    return 0;
 }
 
 static int ut_i2s_init()
@@ -249,35 +302,26 @@ static const httpd_uri_t download_uri = {
 // 后台录音任务
 static void record_task_entry(void *arg)
 {
-    const size_t chunk_size = 4096;
-    uint8_t *chunk_buf      = (uint8_t *)malloc(chunk_size);
-
+    const size_t chunk_size = 2048;
+    uint8_t *chunk_buf = (uint8_t *)malloc(chunk_size);
     if (!chunk_buf) {
-        ESP_LOGE(TAG, "Failed to alloc chunk buffer");
         g_is_recording = false;
         vTaskDelete(NULL);
         return;
     }
-
+    
     g_record_actual_size = 0;
-
-    ESP_LOGI(TAG, "Recording task started...");
-
     while (g_is_recording && (g_record_actual_size + chunk_size < g_record_max_size)) {
-        // 读取音频
         esp_codec_dev_read(g_codec_dev, chunk_buf, chunk_size);
+        
+        update_visualization_buffer(chunk_buf, chunk_size);
 
         memcpy(g_record_buffer + g_record_actual_size, chunk_buf, chunk_size);
         g_record_actual_size += chunk_size;
-
-        // task watchdog
-        // vTaskDelay(1);
     }
-
-    ESP_LOGI(TAG, "Recording task finished. Size: %d", g_record_actual_size);
-
+    
     free(chunk_buf);
-    g_is_recording       = false;
+    g_is_recording = false;
     g_record_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -405,6 +449,8 @@ static void playback_task(void *arg)
         size_t remain    = g_play_total_len - g_play_cursor;
         size_t write_len = (remain > chunk_size) ? chunk_size : remain;
 
+        update_visualization_buffer((const uint8_t*)(g_play_ptr + g_play_cursor), write_len);
+
         esp_err_t ret = esp_codec_dev_write(g_codec_dev, (void *)(g_play_ptr + g_play_cursor), write_len);
 
         if (ret != ESP_OK) {
@@ -478,6 +524,18 @@ int audio_start_record()
     if (!g_codec_dev) return -1;
     if (g_is_recording) return 0;  // 已经在录音
 
+    if (g_active_sample_rate != 44100) {
+        esp_codec_dev_close(g_codec_dev);
+        esp_codec_dev_sample_info_t fs = {
+           .bits_per_sample = 16,
+           .channel         = 1,
+           .sample_rate     = 44100,
+        };
+        esp_codec_dev_open(g_codec_dev, &fs);
+        g_active_sample_rate = 44100;
+        g_active_channels = 1;
+   }
+
     // 分配内存：30秒 * 44100 * 2 bytes = ~2.6MB
     size_t max_seconds = 30;
     g_record_max_size  = 44100 * 1 * 2 * max_seconds;
@@ -530,14 +588,16 @@ int audio_play_data(uint8_t *data, size_t size)
     return esp_codec_dev_write(g_codec_dev, data, size);
 }
 
-int audio_play_async(const uint8_t* data, size_t size, uint32_t rate, uint8_t ch) {
+int audio_play_async(const uint8_t* data, size_t size, uint32_t rate, uint8_t ch, bool need_fft) {
     audio_msg_t msg = {
         .data = data,
         .size = size,
         .sample_rate = rate,
         .channels = ch,
-        .interrupt = true
+        .interrupt = true,
+        .need_fft = need_fft,
     };
+    g_is_playing = true; 
     xQueueOverwrite(xAudioQueue, &msg);
     return 0;
 }
@@ -548,51 +608,39 @@ int audio_play_demo(audio_type_t demo_type)
         case AUDIO_DEMO_PIANO:
         {
             size_t len = _binary_demo_pcm_end - _binary_demo_pcm_start;
-            return audio_play_async(_binary_demo_pcm_start, len, 44100, 1);
+            return audio_play_async(_binary_demo_pcm_start, len, 44100, 1, true);
         }
         break;
         case AUDIO_DEMO_TONE:
         {
             size_t len = _binary_tone_wav_end - _binary_tone_wav_start - 44;
-            return audio_play_async(_binary_tone_wav_start + 44, len, 44100, 2);
+            return audio_play_async(_binary_tone_wav_start + 44, len, 44100, 2, true);
         }
         break;
-        case AUDIO_DEMO_HOTEL_CALIFORNIA:
+        case AUDIO_DEMO_DEAR:
         {
-            size_t len = _binary_hotel_california_wav_end - _binary_hotel_california_wav_start - 44;
-            return audio_play_async(_binary_hotel_california_wav_start + 44, len, 44100, 1);
-        }
-        break;
-        case AUDIO_DEMO_DEAR_1:
-        {
-            size_t len = _binary_dear_1_wav_end - _binary_dear_1_wav_start - 44;
-            return audio_play_async(_binary_dear_1_wav_start + 44, len, 44100, 1);
-        }
-        break;
-        case AUDIO_DEMO_DEAR_2:
-        {
-            size_t len = _binary_dear_2_wav_end - _binary_dear_2_wav_start - 44;
-            return audio_play_async(_binary_dear_2_wav_start + 44, len, 44100, 1);
+            size_t len = _binary_dear_wav_end - _binary_dear_wav_start - 1000;
+            return audio_play_async(_binary_dear_wav_start + 44, len, 22050, 1, true);
         }
         break;
         case AUDIO_VOICE_START:
         {
             size_t len = voice_start_end - voice_start_start - 1000;
-            return audio_play_async(voice_start_start + 44, len, 44100, 1);
+            return audio_play_async(voice_start_start + 44, len, 44100, 1, false);
         }
         break;
         case AUDIO_VOICE_SWITCH:
         {
             audio_set_volume(60);
             size_t len = voice_touch_end - voice_touch_start - 500;
-            return audio_play_async(voice_touch_start, len, 44100, 1);
+            return audio_play_async(voice_touch_start, len, 44100, 1, false);
         }
         break;
         case AUDIO_VOICE_CHECK:
         {
             audio_set_volume(60);
             size_t len = voice_button_end - voice_button_start;
-            return audio_play_async(voice_button_start, len, 44100, 1);
+            return audio_play_async(voice_button_start, len, 44100, 1, false);
         }
         break;
         default:

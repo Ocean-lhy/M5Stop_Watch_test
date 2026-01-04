@@ -5,10 +5,6 @@
 #include "touch_user.h"
 #include "audio_user.h"
 #include "imu_user.h"
-#include "rx8130.h"
-#include "esp_wifi.h"
-#include "wifi_manager.h"
-#include "esp_sntp.h"
 
 // 定义测试项结构
 struct TestItem {
@@ -22,34 +18,24 @@ public:
     void init();
     void loop();
 
+    enum AudioMode {
+        MODE_PLAY_PIANO = 0,
+        MODE_PLAY_TONE,
+        MODE_PLAY_DEAR,
+        MODE_RECORDER,
+        MODE_COUNT
+    };
+
     // 具体测试用例函数
-    static void test_i2c_rate();
-    static void test_grove_5v();
-    static void test_charge_switch();
-    static void test_status_show();
-    static void test_display_color();
+    static void test_main_page();
     static void test_touch_draw();
     static void test_audio_record();
-    static void test_audio_play();
+    static void test_audio_play_0();
+    static void test_audio_play_1();
+    static void test_audio_play_2();
     static void test_imu_data();
-    static void test_rtc_show();
     static void test_vibration();
-    static void test_grove_io();
-    static void test_bottom_io();
-    static void test_ch442e();
-    static void test_wifi_scan();
-    static void test_wifi_distance();
-    static void test_l0_mode();
-    static void test_l1_mode();
-    static void test_l2_mode();
-    static void test_imu_wake();
-    static void test_imu_shutdown_wake();
-    static void test_rtc_wake();
-    static void test_rtc_shutdown_wake();
-    static void test_base_wake();
-    static void test_full_load();
-    static void test_aging();
-    static void test_flash();
+    static void test_audio_unified(int current_mode_idx);
 
 private:
     // 基础UI功能

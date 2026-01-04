@@ -15,13 +15,11 @@ extern "C" {
 typedef enum {
     AUDIO_DEMO_PIANO = 0,
     AUDIO_DEMO_TONE = 1,
-    AUDIO_DEMO_HOTEL_CALIFORNIA = 2,
-    AUDIO_DEMO_DEAR_1 = 3,
-    AUDIO_DEMO_DEAR_2 = 4,
-    AUDIO_VOICE_START = 5,
-    AUDIO_VOICE_SWITCH = 6,
-    AUDIO_VOICE_CHECK = 7,
-    AUDIO_TYPE_COUNT = 8,
+    AUDIO_DEMO_DEAR = 2,
+    AUDIO_VOICE_START = 4,
+    AUDIO_VOICE_SWITCH = 5,
+    AUDIO_VOICE_CHECK = 6,
+    AUDIO_TYPE_COUNT = 7,
 } audio_type_t;
 
 // 初始化音频驱动 (I2S, Codec)
@@ -91,6 +89,15 @@ void audio_get_progress(size_t *out_current, size_t *out_total);
  * @param ch 通道数
  */
 void audio_get_active_info(uint32_t *rate, uint8_t *ch);
+
+// 添加播放 RAM 数据的函数声明
+int audio_play_raw_async(const uint8_t* data, size_t size, uint32_t rate, uint8_t ch);
+// 获取录音数据的指针和大小（用于播放）
+void audio_get_record_buffer(uint8_t **out_data, size_t *out_size);
+
+void audio_get_active_info(uint32_t *rate, uint8_t *ch);
+
+void audio_get_fft_input(float *out_buff, int count);
 
 #ifdef __cplusplus
 }

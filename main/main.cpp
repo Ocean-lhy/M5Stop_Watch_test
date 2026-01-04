@@ -75,7 +75,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "===========================================");
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
-    ESP_LOGI(TAG, "M5STACK StopWatch Test v0.1 Starting...");
+    ESP_LOGI(TAG, "M5STACK StopWatch Test Starting...");
     gpio_deep_sleep_hold_dis();
 
     // I2C TEST
