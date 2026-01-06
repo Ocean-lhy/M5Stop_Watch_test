@@ -50,6 +50,9 @@ public:
     static void test_full_load();
     static void test_aging();
     static void test_flash();
+    static void test_pmic_timer_shutdown();
+    static void test_pmic_timer_wake();
+    static void test_pmic_timer_restart();
 
 private:
     // 基础UI功能

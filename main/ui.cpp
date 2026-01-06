@@ -62,20 +62,36 @@ void init_stopwatch_geometry()
 
 // 测试列表定义
 std::vector<TestItem> testList = {
-    {"1. 设置I2C速率", StopWatchApp::test_i2c_rate},    {"2. 设置Grove 5V", StopWatchApp::test_grove_5v},
-    {"3. 设置充电", StopWatchApp::test_charge_switch},  {"4. 状态信息", StopWatchApp::test_status_show},
-    {"5. 显示测试", StopWatchApp::test_display_color},  {"6. 触摸测试", StopWatchApp::test_touch_draw},
-    {"7. 录音测试", StopWatchApp::test_audio_record},   {"8. 播放测试", StopWatchApp::test_audio_play},
-    {"9. IMU测试", StopWatchApp::test_imu_data},        {"10. RTC时间", StopWatchApp::test_rtc_show},
-    {"11. 振动测试", StopWatchApp::test_vibration},     {"12. Grove IO测试", StopWatchApp::test_grove_io},
-    {"13. 底部IO测试", StopWatchApp::test_bottom_io},   {"14. CH442E 设置", StopWatchApp::test_ch442e},
-    {"15. WiFi 扫描", StopWatchApp::test_wifi_scan},    {"16. WiFi 拉距", StopWatchApp::test_wifi_distance},
-    {"17. Flash 测试", StopWatchApp::test_flash},       {"18. L0 关机", StopWatchApp::test_l0_mode},
-    {"19. L1 待机", StopWatchApp::test_l1_mode},        {"20. L2 睡眠", StopWatchApp::test_l2_mode},
-    {"21. IMU 唤醒 L2", StopWatchApp::test_imu_wake},   {"22. IMU 唤醒 L1", StopWatchApp::test_imu_shutdown_wake},
-    {"23. RTC 唤醒 L2", StopWatchApp::test_rtc_wake},   {"24. RTC 唤醒 L1", StopWatchApp::test_rtc_shutdown_wake},
-    {"25. 底座插入唤醒", StopWatchApp::test_base_wake}, {"26. 满载测试", StopWatchApp::test_full_load},
+    {"1. 设置I2C速率", StopWatchApp::test_i2c_rate},
+    {"2. 设置Grove 5V", StopWatchApp::test_grove_5v},
+    {"3. 设置充电", StopWatchApp::test_charge_switch},
+    {"4. 状态信息", StopWatchApp::test_status_show},
+    {"5. 显示测试", StopWatchApp::test_display_color},
+    {"6. 触摸测试", StopWatchApp::test_touch_draw},
+    {"7. 录音测试", StopWatchApp::test_audio_record},
+    {"8. 播放测试", StopWatchApp::test_audio_play},
+    {"9. IMU测试", StopWatchApp::test_imu_data},
+    {"10. RTC时间", StopWatchApp::test_rtc_show},
+    {"11. 振动测试", StopWatchApp::test_vibration},
+    {"12. Grove IO测试", StopWatchApp::test_grove_io},
+    {"13. 底部IO测试", StopWatchApp::test_bottom_io},
+    {"14. CH442E 设置", StopWatchApp::test_ch442e},
+    {"15. WiFi 扫描", StopWatchApp::test_wifi_scan},
+    {"16. WiFi 拉距", StopWatchApp::test_wifi_distance},
+    {"17. Flash 测试", StopWatchApp::test_flash},
+    {"18. L0 关机", StopWatchApp::test_l0_mode},
+    {"19. L1 待机", StopWatchApp::test_l1_mode},
+    {"20. L2 睡眠", StopWatchApp::test_l2_mode},
+    {"21. IMU 唤醒 L2", StopWatchApp::test_imu_wake},
+    {"22. IMU 唤醒 L1", StopWatchApp::test_imu_shutdown_wake},
+    {"23. RTC 唤醒 L2", StopWatchApp::test_rtc_wake},
+    {"24. RTC 唤醒 L1", StopWatchApp::test_rtc_shutdown_wake},
+    {"25. 底座插入唤醒", StopWatchApp::test_base_wake},
+    {"26. 满载测试", StopWatchApp::test_full_load},
     {"27. 老化测试", StopWatchApp::test_aging},
+    {"28. PMIC定时关机", StopWatchApp::test_pmic_timer_shutdown},
+    {"29. PMIC定时开机", StopWatchApp::test_pmic_timer_wake},
+    {"30. PMIC定时重启", StopWatchApp::test_pmic_timer_restart},
 };
 
 void StopWatchApp::init()
@@ -1965,5 +1981,132 @@ void StopWatchApp::test_aging()
         }
         // 刷新显示
         display_gfx_loop();
+    }
+}
+
+// 28. PMIC定时关机
+void StopWatchApp::test_pmic_timer_shutdown()
+{
+    bool is_start = false;
+    uint32_t time_start = 0;
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextDatum(middle_center);
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) {
+            pm1_tim_set(PM1_ADDR_TIM_DISABLE, PM1_TIM_ACTION_000, 0);
+            is_start = false;
+            return;
+        }
+        if (app._inputs.btnLeftClicked) {
+            if (is_start) {
+                pm1_tim_set(PM1_ADDR_TIM_ENABLE, PM1_TIM_ACTION_000, 0);
+                is_start = false;
+            } else {
+                pm1_tim_set(PM1_ADDR_TIM_ENABLE, PM1_TIM_ACTION_100, 5);
+                is_start = true;
+                time_start = lgfx::v1::millis();
+            }
+        }
+        if (is_start) {
+            char buf[100];
+            sprintf(buf, "开始计时，%d秒后关机，右键退出", 5 - (uint8_t)((lgfx::v1::millis() - time_start) / 1000));
+            canvas.fillScreen(TFT_BLACK);
+            canvas.drawString(buf, 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+        }
+        else
+        {
+            canvas.fillScreen(TFT_BLACK);
+            canvas.drawString("左键: 开始计时, 右键: 退出", 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
+
+// 29. PMIC定时开机
+void StopWatchApp::test_pmic_timer_wake()
+{
+    bool is_start = false;
+    uint32_t time_start = 0;
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextDatum(middle_center);
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) {
+            pm1_tim_set(PM1_ADDR_TIM_DISABLE, PM1_TIM_ACTION_000, 0);
+            is_start = false;
+            return;
+        }
+        if (app._inputs.btnLeftClicked) {
+            if (is_start) {
+                pm1_tim_set(PM1_ADDR_TIM_ENABLE, PM1_TIM_ACTION_000, 0);
+                is_start = false;
+            } else {
+                is_start = true;
+                time_start = lgfx::v1::millis();
+            }
+        }
+        if (is_start) {
+            char buf[100];
+            sprintf(buf, "开始计时，%d秒后关机，5秒后开机，右键退出", 5 - (uint8_t)((lgfx::v1::millis() - time_start) / 1000));
+            canvas.fillScreen(TFT_BLACK);
+            canvas.drawString(buf, 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+            if (lgfx::v1::millis() - time_start > 5000) {
+                pm1_tim_set(PM1_ADDR_TIM_ENABLE, PM1_TIM_ACTION_011, 5);
+                vTaskDelay(50 / portTICK_PERIOD_MS);
+                pm1_sys_cmd(PM1_SYS_CMD_SHUTDOWN);
+            }
+        }
+        else
+        {
+            canvas.fillScreen(TFT_BLACK);
+            canvas.drawString("左键: 准备关机, 右键: 退出", 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
+
+// 30. PMIC定时重启
+void StopWatchApp::test_pmic_timer_restart()
+{
+    bool is_start = false;
+    uint32_t time_start = 0;
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextDatum(middle_center);
+    while (1) {
+        app.updateInputs(false);
+        if (app._inputs.btnRightClicked) {
+            pm1_tim_set(PM1_ADDR_TIM_DISABLE, PM1_TIM_ACTION_000, 0);
+            is_start = false;
+            return;
+        }
+        if (app._inputs.btnLeftClicked) {
+            if (is_start) {
+                pm1_tim_set(PM1_ADDR_TIM_ENABLE, PM1_TIM_ACTION_000, 0);
+                is_start = false;
+            } else {
+                pm1_tim_set(PM1_ADDR_TIM_ENABLE, PM1_TIM_ACTION_010, 5);
+                is_start = true;
+                time_start = lgfx::v1::millis();
+            }
+        }
+        if (is_start) {
+            char buf[100];
+            sprintf(buf, "开始计时，%d秒后重启，右键退出", 5 - (uint8_t)((lgfx::v1::millis() - time_start) / 1000));
+            canvas.fillScreen(TFT_BLACK);
+            canvas.drawString(buf, 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+        }
+        else
+        {
+            canvas.fillScreen(TFT_BLACK);
+            canvas.drawString("左键: 准备重启, 右键: 退出", 233, 233);
+            canvas.pushSprite(&gfx, 0, 0);
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
