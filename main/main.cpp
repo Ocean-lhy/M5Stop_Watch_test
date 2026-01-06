@@ -87,6 +87,7 @@ extern "C" void app_main(void)
 
     pm1_wake_src_t wake_src;
     pm1_wake_src_read(&wake_src, PM1_ADDR_WAKE_FLAG_ALL_CLEAN);
+    ESP_LOGI(TAG, "========== PM1 Wake Source ==========");
     if (wake_src == PM1_WAKE_SRC_UNKNOWN || wake_src == PM1_WAKE_SRC_NULL) {
         ESP_LOGE(TAG, "wake_src is unknown or null : %d", wake_src);
     } else {
@@ -100,6 +101,7 @@ extern "C" void app_main(void)
     }
     clean_irq_flags();
 
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
     // scan I2C after L3B enable
     scan_i2c_bus_device();
 
