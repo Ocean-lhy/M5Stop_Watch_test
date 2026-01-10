@@ -288,6 +288,19 @@ void bmi270_INT_wakeup_deepsleep_test()
 RX8130_Class rx8130;
 void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
 {
+    if (wakeup_mode == WakeupMode::WAKEUP_DEEPSLEEP) {
+        stop_watch_set_i2c_speed(false);
+        io_expander.factoryReset();  // clear all io expander config
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+        // sleep cst820
+        i2c_bus_device_handle_t cst820_dev = i2c_bus_device_create(g_i2c_bus, CST820_ADDR, 100000);
+        if (cst820_dev == NULL) {
+            ESP_LOGE(TAG, "cst820_dev create failed");
+        }
+        uint8_t i2c_buf = 0x03;
+        i2c_bus_write_byte(cst820_dev, 0xE5, i2c_buf);
+    }
     rx8130.begin(g_i2c_bus, RX8130_ADDR);
     // recovery
     rx8130.clearIrqFlags();
@@ -308,11 +321,29 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
             ESP_LOGI(TAG, "SET RX8130-> Time: %04d-%02d-%02d %02d:%02d:%02d", time.tm_year + 1900, time.tm_mon + 1,
                      time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
             rx8130.setTime(&time);
+
+            // sleep cst820 and bmi270
+            i2c_bus_device_handle_t cst820_dev = i2c_bus_device_create(g_i2c_bus, CST820_ADDR, 100000);
+            if (cst820_dev == NULL) {
+                ESP_LOGE(TAG, "cst820_dev create failed");
+            }
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            uint8_t i2c_buf = 0x03;
+            i2c_bus_write_byte(cst820_dev, 0xE5, i2c_buf);
+
+            i2c_bus_device_handle_t i2c_dev_handle_bmi270 = i2c_bus_device_create(g_i2c_bus, BMI270_ADDR, 100000);
+            if (i2c_dev_handle_bmi270 == NULL) {
+                ESP_LOGE(TAG, "i2c_dev_handle_bmi270 create failed");
+            }
+            uint8_t reg_data = 0x01;
+            i2c_bus_write_byte(i2c_dev_handle_bmi270, 0x7C, reg_data);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            reg_data = 0x00;
+            i2c_bus_write_byte(i2c_dev_handle_bmi270, 0x7D, reg_data);
         } break;
         case WakeupDevice::IMU_WAKEUP: {
             ESP_LOGI(TAG, "Configuring BMI270 for motion wake-up");
             bmi270_dev_init(g_i2c_bus);
-            pm1_ldo_set_power_hold(true);  // hold LDO3V3 power open to keep IMU power on
         } break;
         case WakeupDevice::PORT_WAKEUP: {
             ESP_LOGI(TAG, "Configuring PORT for wake-up");
@@ -325,15 +356,22 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
 
     // set G1 to IRQ function, for sending irq signal to ESP32S3
     if (wakeup_mode == WakeupMode::WAKEUP_DEEPSLEEP) {
+        pm1_gpio_set(PMG1_G12_PY_IRQ, PM1_GPIO_MODE_INPUT, PM1_GPIO_INPUT_NC, PM1_GPIO_PUPD_PULLUP,
+                     PM1_GPIO_DRV_PUSH_PULL);
         pm1_gpio_set_func(PMG1_G12_PY_IRQ, PM1_GPIO_FUNC_IRQ);
     }
 
     // G0 RTC & IMU and G4 PORT irq MASK DISABLE
-    pm1_irq_set_gpio_mask(PMG0_RTC_IMU_INT, PM1_IRQ_MASK_DISABLE);
-    pm1_irq_set_gpio_mask(PMG4_PORT_INT, PM1_IRQ_MASK_DISABLE);
+    bool rtc_imu_irq_mask = (wakeup_device == WakeupDevice::RTC_WAKEUP || wakeup_device == WakeupDevice::IMU_WAKEUP);
+    bool port_irq_mask    = (wakeup_device == WakeupDevice::PORT_WAKEUP);
+    pm1_irq_set_gpio_mask(PMG0_RTC_IMU_INT, rtc_imu_irq_mask ? PM1_IRQ_MASK_DISABLE : PM1_IRQ_MASK_ENABLE);
+    pm1_irq_set_gpio_mask(PMG4_PORT_INT, port_irq_mask ? PM1_IRQ_MASK_DISABLE : PM1_IRQ_MASK_ENABLE);
 
     pm1_irq_set_gpio_mask(PMG2_CHG_STAT, PM1_IRQ_MASK_ENABLE);
     pm1_irq_set_gpio_mask(PMG3_CHG_PROG, PM1_IRQ_MASK_ENABLE);
+
+    pm1_gpio_set(PMG2_CHG_STAT, PM1_GPIO_MODE_INPUT, PM1_GPIO_INPUT_NC, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_OPEN_DRAIN);
+    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_INPUT, PM1_GPIO_INPUT_NC, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_OPEN_DRAIN);
 
     pm1_gpio_num_t wakeup_gpio_num = wakeup_device == WakeupDevice::PORT_WAKEUP ? PMG4_PORT_INT : PMG0_RTC_IMU_INT;
     // set G0 to wakeup pin, for wakeup trigger
@@ -391,6 +429,9 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
 #endif
     } else if (wakeup_device == WakeupDevice::IMU_WAKEUP) {
         bmi270_INT_wakeup_deepsleep_test();
+        if (wakeup_mode == WakeupMode::WAKEUP_SHUTDOWN) {
+            pm1_ldo_set_power_hold(true);  // hold LDO3V3 power open to keep pullup on IRQ_PIN
+        }
         ESP_LOGI(TAG, "system will deep sleep or shutdown, and it will automatically wake up when motion is detected.");
 #if 0
         gpio_config_t io_conf = {
@@ -422,6 +463,7 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
         py32_io_expander_sleep();
         pm1_pwr_set_cfg(PM1_PWR_CFG_LED_CONTROL, 0, NULL);  // disable LED
         pm1_pwr_set_cfg(PM1_PWR_CFG_5V_INOUT, 0, NULL);
+        pm1_set_i2c_sleep_time(1);
 
         gpio_reset_pin(IRQ_PIN);
         rtc_gpio_pullup_en(IRQ_PIN);
