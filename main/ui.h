@@ -22,6 +22,16 @@ public:
     void init();
     void loop();
 
+    enum AudioMode {
+        MODE_PLAY_PIANO = 0,
+        MODE_PLAY_TONE,
+        MODE_PLAY_DEAR_1,
+        MODE_PLAY_DEAR_2,
+        MODE_PLAY_HOTEL_CALIFORNIA,
+        MODE_RECORDER,
+        MODE_COUNT
+    };
+
     // 具体测试用例函数
     static void test_i2c_rate();
     static void test_grove_5v();
@@ -84,6 +94,7 @@ private:
 
     // 菜单状态
     int menu_index       = 0;
+    int _last_menu_index = 0;
     float scroll_offset  = 0.0f;  // 当前滚动的渲染偏移（平滑跟随 menu_index）
     float target_offset  = 0.0f;  // 目标偏移
     const float spring_k = 0.3f;  // 弹性系数 (0.1 - 0.5)，值越小越丝滑
