@@ -513,7 +513,7 @@ void StopWatchApp::test_charge_switch()
             else {
                 pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, PM1_PWR_CFG_CHG_EN, NULL);
                 // Fast/Slow logic using PMG3_CHG_PROG
-                if (opt == 2) {
+                if (opt == 1) {
                     pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_LOW, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_PUSH_PULL);
                 } else {
                     pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_INPUT, PM1_GPIO_INPUT_NC, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_OPEN_DRAIN);
