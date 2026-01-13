@@ -32,7 +32,7 @@ StopWatchApp app;
 #define UDP_TARGET_IP   "192.168.3.5"
 #define UDP_TARGET_PORT 12345
 // title
-#define MAIN_TITLE "StopWatch Test v0.3"
+#define MAIN_TITLE "StopWatch Test v0.4"
 
 #define CYLINDER_POINTS 16  // 圆周采样点数
 
@@ -494,7 +494,7 @@ void StopWatchApp::test_grove_5v()
 void StopWatchApp::test_charge_switch()
 {
     int opt            = 0;
-    const char *opts[] = {"关闭充电", "输出高电平,慢充", "输出高电平,快充"};
+    const char *opts[] = {"关闭充电", "高阻态,慢充", "输出低电平,快充"};
     while (1) {
         app.drawTitle(testList[2].name);
         canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
@@ -514,11 +514,9 @@ void StopWatchApp::test_charge_switch()
                 pm1_pwr_set_cfg(PM1_PWR_CFG_CHG_EN, PM1_PWR_CFG_CHG_EN, NULL);
                 // Fast/Slow logic using PMG3_CHG_PROG
                 if (opt == 2) {
-                    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_HIGH, PM1_GPIO_PUPD_NC,
-                                 PM1_GPIO_DRV_PUSH_PULL);
+                    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_LOW, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_PUSH_PULL);
                 } else {
-                    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_OUTPUT, PM1_GPIO_OUTPUT_LOW, PM1_GPIO_PUPD_NC,
-                                 PM1_GPIO_DRV_PUSH_PULL);
+                    pm1_gpio_set(PMG3_CHG_PROG, PM1_GPIO_MODE_INPUT, PM1_GPIO_INPUT_NC, PM1_GPIO_PUPD_NC, PM1_GPIO_DRV_OPEN_DRAIN);
                 }
             }
             return;
