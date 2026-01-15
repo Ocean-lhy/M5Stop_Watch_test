@@ -14,6 +14,8 @@
 #include "spi_flash_chip_driver.h"
 static const char *TAG = "main";
 
+pm1_wake_src_t wake_src = PM1_WAKE_SRC_NULL;
+
 extern "C" void app_main(void)
 {
     // NVS Init (Wifi needed)
@@ -85,7 +87,6 @@ extern "C" void app_main(void)
     pmic_init();
     py32_io_expander_init();
 
-    pm1_wake_src_t wake_src;
     pm1_wake_src_read(&wake_src, PM1_ADDR_WAKE_FLAG_ALL_CLEAN);
     ESP_LOGI(TAG, "========== PM1 Wake Source ==========");
     if (wake_src == PM1_WAKE_SRC_UNKNOWN || wake_src == PM1_WAKE_SRC_NULL) {

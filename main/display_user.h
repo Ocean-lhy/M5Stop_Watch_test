@@ -138,6 +138,11 @@ public:
             setPanel(&_panel_instance);
         }
     }
+
+    void setBrightness(uint8_t brightness)
+    {
+        _panel_instance.setBrightness(brightness);
+    }
 };
 
 extern M5StopWatch gfx;

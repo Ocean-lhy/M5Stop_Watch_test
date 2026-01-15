@@ -63,6 +63,7 @@ public:
     static void test_pmic_timer_shutdown();
     static void test_pmic_timer_wake();
     static void test_pmic_timer_restart();
+    static void test_amoled_brightness();
 
 private:
     // 基础UI功能
