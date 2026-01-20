@@ -38,6 +38,8 @@ void stop_watch_power_mode_L3B();
 
 void stop_watch_speaker_set(bool enable);
 
+void stop_watch_audio_enable(bool enable);
+
 void stop_watch_set_i2c_speed(bool is_400khz);
 
 void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode);

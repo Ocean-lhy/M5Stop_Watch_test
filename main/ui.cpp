@@ -34,7 +34,7 @@ extern pm1_wake_src_t wake_src;
 #define UDP_TARGET_IP   "192.168.3.5"
 #define UDP_TARGET_PORT 12345
 // title
-#define MAIN_TITLE "StopWatch Test v0.4"
+#define MAIN_TITLE "StopWatch Test v0.6"
 
 #define CYLINDER_POINTS 16  // 圆周采样点数
 
@@ -810,7 +810,8 @@ void StopWatchApp::test_audio_play()
     PlayerState current_state    = STATE_IDLE;
     int volume                   = 60;
     unsigned long rec_start_time = 0;
-    bool pa_enabled              = true;
+    bool pa_enabled              = io_expander.digitalRead(PY32_SPK_PA_PIN) == 1 ? true : false;
+    bool power_enabled           = io_expander.digitalRead(PY32_AU_EN_PIN) == 1 ? true : false;
 
     // --- 频谱动画变量 ---
     const int BARS_COUNT             = 11;   // 奇数，方便有一个中间的主柱子
@@ -828,7 +829,6 @@ void StopWatchApp::test_audio_play()
     // 初始化
     audio_init();
     audio_set_volume(volume);
-    audio_speaker_enable(pa_enabled);
     audio_play_stop();
 
     auto get_mode_name = [&](int idx) -> const char * {
@@ -932,11 +932,16 @@ void StopWatchApp::test_audio_play()
             // ESP_LOGI("TOUCH", "Click at %d, %d", tx, ty);
 
             // 下方区域：PA 开关按钮
-            if (ty > 380 && ty < 466 && tx > 180 && tx < 280) {
+            if (ty > 380 && ty < 466 && tx > 60 && tx < 200) {
                 pa_enabled = !pa_enabled;
                 if (current_state != STATE_RECORDING) {
                     audio_speaker_enable(pa_enabled);
                 }
+            }
+            // 下方区域：电源开关按钮
+            else if (ty > 380 && ty < 466 && tx > 260 && tx < 406) {
+                power_enabled = !power_enabled;
+                audio_enable(power_enabled);
             }
             // 下方区域：调音量
             else if (ty > 320) {
@@ -1219,7 +1224,7 @@ void StopWatchApp::test_audio_play()
         // 6. PA 开关按钮
         int btn_w = 80;
         int btn_h = 36;
-        int btn_x = 193;
+        int btn_x = 120;
         int btn_y = 385;
 
         uint16_t btn_color = pa_enabled ? TFT_GREEN : TFT_RED;
@@ -1229,7 +1234,18 @@ void StopWatchApp::test_audio_play()
         canvas.setTextSize(1);
         canvas.drawString(pa_enabled ? "PA ON" : "PA OFF", btn_x + btn_w / 2, btn_y + btn_h / 2);
 
-        // 7. 底部状态栏
+        // 7. 电源开关按钮
+        btn_x = 280;
+        btn_y = 385;
+
+        btn_color = power_enabled ? TFT_GREEN : TFT_RED;
+        canvas.fillRoundRect(btn_x, btn_y, btn_w, btn_h, 8, btn_color);
+        canvas.setTextDatum(middle_center);
+        canvas.setTextColor(TFT_WHITE, btn_color);
+        canvas.setTextSize(1);
+        canvas.drawString(power_enabled ? "ENABLE" : "DISABLE", btn_x + btn_w / 2, btn_y + btn_h / 2);
+
+        // 8. 底部状态栏
         canvas.setTextDatum(bottom_center);
         canvas.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
         char status_msg[64];

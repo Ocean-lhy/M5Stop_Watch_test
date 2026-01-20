@@ -264,6 +264,15 @@ void stop_watch_speaker_set(bool enable)
     }
 }
 
+void stop_watch_audio_enable(bool enable)
+{
+    if (enable) {
+        io_expander.digitalWrite(PY32_AU_EN_PIN, 1);
+    } else {
+        io_expander.digitalWrite(PY32_AU_EN_PIN, 0);
+    }
+}
+
 void stop_watch_set_i2c_speed(bool is_400khz)
 {
     if (is_400khz) {

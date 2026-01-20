@@ -196,6 +196,7 @@ void audio_get_record_buffer(uint8_t **out_data, size_t *out_size)
 
 int audio_play_raw_async(const uint8_t* data, size_t size, uint32_t rate, uint8_t ch) {
     if (data == NULL || size == 0) return -1;
+    if (!g_codec_dev || !xAudioQueue) return -1;
     
     audio_speaker_enable(true); 
 
@@ -419,26 +420,47 @@ void audio_deinit()
         }
     }
 
-    // 3. 释放录音内存
+    // 3. 停止播放任务
+    if (g_is_playing) {
+        g_is_playing = false;
+        while (g_play_task_handle != NULL) {
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+    }
+
+    // 4. 清空音频队列，防止残留消息
+    if (xAudioQueue) {
+        xQueueReset(xAudioQueue);
+    }
+
+    // 5. 等待 audio_main_task 回到空闲状态
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+
+    // 6. 释放录音内存
     if (g_record_buffer) {
         free(g_record_buffer);
         g_record_buffer = NULL;
     }
 
-    // 4. 销毁 Codec Device
+    // 7. 销毁 Codec Device
     if (g_codec_dev) {
         esp_codec_dev_close(g_codec_dev);
         esp_codec_dev_delete(g_codec_dev);
         g_codec_dev = NULL;
     }
 
-    // 5. 销毁 Interfaces
+    // 8. 销毁 Interfaces
     if (g_codec_if) audio_codec_delete_codec_if(g_codec_if);
     if (g_ctrl_if) audio_codec_delete_ctrl_if(g_ctrl_if);
     if (g_gpio_if) audio_codec_delete_gpio_if(g_gpio_if);
     if (g_data_if) audio_codec_delete_data_if(g_data_if);
 
-    // 6. 销毁 I2S
+    g_codec_if = NULL;
+    g_ctrl_if = NULL;
+    g_gpio_if = NULL;
+    g_data_if = NULL;
+
+    // 9. 销毁 I2S
     ut_i2s_deinit();
 }
 
@@ -506,6 +528,7 @@ int audio_play_start(const uint8_t *data, size_t size)
 
 void audio_play_stop()
 {
+    if (!g_codec_dev) return;
     if (g_is_playing) {
         g_is_playing = false;  // 通知任务退出循环
         // 等待任务彻底结束
@@ -536,6 +559,17 @@ int audio_set_volume(int volume)
 void audio_speaker_enable(bool enable)
 {
     stop_watch_speaker_set(enable);
+}
+
+void audio_enable(bool enable)
+{
+    if (enable == false) {
+        audio_deinit();
+    }
+    stop_watch_audio_enable(enable);
+    if (enable == true) {
+        audio_init();
+    }
 }
 
 int audio_start_record()
@@ -608,6 +642,10 @@ int audio_play_data(uint8_t *data, size_t size)
 }
 
 int audio_play_async(const uint8_t* data, size_t size, uint32_t rate, uint8_t ch, bool need_fft) {
+    if (!g_codec_dev || !xAudioQueue) {
+        return -1;
+    }
+    
     audio_msg_t msg = {
         .data = data,
         .size = size,

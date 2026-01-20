@@ -51,6 +51,9 @@ int audio_play_demo(audio_type_t demo_type);
 // 控制功放开关
 void audio_speaker_enable(bool enable);
 
+// 控制音频使能
+void audio_enable(bool enable);
+
 // 查询是否正在录音
 bool audio_is_recording();
 
