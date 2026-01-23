@@ -143,38 +143,33 @@ void RX8130_Class::setAlarmIrq(struct tm* time)
 {
     uint8_t buf = 0;
 
-    // Write 0 to AIE
+    // Disable AIE and UIE
     buf = readRegister8(RX8130_REG_CTRL0);
     clrbit(buf, 3);
     clrbit(buf, 5);
     writeRegister8(RX8130_REG_CTRL0, buf);
 
-    buf = readRegister8(RX8130_REG_CTRL0);
-    // debug_print_reg(0x1E, buf);
-
-    // Hour AE, week AE day AE
+    // Set week/day alarm (disable by setting bit 7)
     buf = 0x80;
     writeRegister8(RX8130_REG_ALWDAY, buf);
-    buf = readRegister8(RX8130_REG_ALWDAY);
-    // debug_print_reg(0x19, buf);
 
+    // Set hour alarm (disable by setting bit 7)
     buf = 0x80;
     writeRegister8(RX8130_REG_ALHOUR, buf);
-    buf = readRegister8(RX8130_REG_ALHOUR);
-    // debug_print_reg(0x18, buf);
 
-    buf = 0x80;
+    // Set minute alarm (enable and set value)
+    buf = dec2bcd(time->tm_min) & 0x7F;
     writeRegister8(RX8130_REG_ALMIN, buf);
-    buf = readRegister8(RX8130_REG_ALMIN);
-    // debug_print_reg(0x17, buf);
 
-    // Write 1 to AIE
+    // Clear alarm flag
+    buf = readRegister8(RX8130_REG_FLAG);
+    clrbit(buf, 3);
+    writeRegister8(RX8130_REG_FLAG, buf);
+
+    // Enable AIE
     buf = readRegister8(RX8130_REG_CTRL0);
     setbit(buf, 3);
     writeRegister8(RX8130_REG_CTRL0, buf);
-
-    buf = readRegister8(RX8130_REG_CTRL0);
-    // debug_print_reg(0x1E, buf);
 }
 
 // RX8130 寄存器地址

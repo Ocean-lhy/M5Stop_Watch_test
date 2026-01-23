@@ -18,7 +18,8 @@ enum class WakeupMode {
 };
 
 enum class WakeupDevice {
-    RTC_WAKEUP,
+    RTC_ALARM_WAKEUP,
+    RTC_TIME_UPDATE_WAKEUP,
     IMU_WAKEUP,
     PORT_WAKEUP,
 };

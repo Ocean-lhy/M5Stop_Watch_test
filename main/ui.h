@@ -54,8 +54,10 @@ public:
     static void test_l2_mode();
     static void test_imu_wake();
     static void test_imu_shutdown_wake();
-    static void test_rtc_wake();
-    static void test_rtc_shutdown_wake();
+    static void test_rtc_alarm_wake();
+    static void test_rtc_time_update_wake();
+    static void test_rtc_alarm_shutdown_wake();
+    static void test_rtc_time_update_shutdown_wake();
     static void test_base_wake();
     static void test_full_load();
     static void test_aging();
@@ -99,6 +101,12 @@ private:
     float scroll_offset  = 0.0f;  // 当前滚动的渲染偏移（平滑跟随 menu_index）
     float target_offset  = 0.0f;  // 目标偏移
     const float spring_k = 0.3f;  // 弹性系数 (0.1 - 0.5)，值越小越丝滑
+    
+    // 高亮框动画状态
+    float highlight_y = 233.0f;        // 高亮框当前Y位置
+    float highlight_width = 200.0f;    // 高亮框当前宽度
+    float target_highlight_y = 233.0f; // 高亮框目标Y位置
+    float target_highlight_width = 200.0f; // 高亮框目标宽度
 
     // 工具函数
     bool checkTouchRegion(int x1, int y1, int x2, int y2);  // 屏幕点击

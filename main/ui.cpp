@@ -6,6 +6,7 @@
 
 #include "bmi270_tools.h"
 #include "driver/ledc.h"
+#include "driver/uart.h"
 #include "esp_log.h"
 #include "tools.h"
 
@@ -34,7 +35,7 @@ extern pm1_wake_src_t wake_src;
 #define UDP_TARGET_IP   "192.168.3.5"
 #define UDP_TARGET_PORT 12345
 // title
-#define MAIN_TITLE "StopWatch Test v0.6"
+#define MAIN_TITLE "StopWatch Test v0.7"
 
 #define CYLINDER_POINTS 16  // 圆周采样点数
 
@@ -88,15 +89,17 @@ std::vector<TestItem> testList = {
     {"20. L2 睡眠", StopWatchApp::test_l2_mode},
     {"21. IMU 唤醒 L2", StopWatchApp::test_imu_wake},
     {"22. IMU 唤醒 L1", StopWatchApp::test_imu_shutdown_wake},
-    {"23. RTC 唤醒 L2", StopWatchApp::test_rtc_wake},
-    {"24. RTC 唤醒 L1", StopWatchApp::test_rtc_shutdown_wake},
-    {"25. 底座插入唤醒", StopWatchApp::test_base_wake},
-    {"26. 满载测试", StopWatchApp::test_full_load},
-    {"27. 老化测试", StopWatchApp::test_aging},
-    {"28. PMIC定时关机", StopWatchApp::test_pmic_timer_shutdown},
-    {"29. PMIC定时开机", StopWatchApp::test_pmic_timer_wake},
-    {"30. PMIC定时重启", StopWatchApp::test_pmic_timer_restart},
-    {"31. AMOLED 亮度测试", StopWatchApp::test_amoled_brightness},
+    {"23. RTC ALARM唤醒 L2", StopWatchApp::test_rtc_alarm_wake},
+    {"24. RTC TIME唤醒 L2", StopWatchApp::test_rtc_time_update_wake},
+    {"25. RTC ALARM唤醒 L1", StopWatchApp::test_rtc_alarm_shutdown_wake},
+    {"26. RTC TIME唤醒 L1", StopWatchApp::test_rtc_time_update_shutdown_wake},
+    {"27. 底座插入唤醒", StopWatchApp::test_base_wake},
+    {"28. 满载测试", StopWatchApp::test_full_load},
+    {"29. 老化测试", StopWatchApp::test_aging},
+    {"30. PMIC定时关机", StopWatchApp::test_pmic_timer_shutdown},
+    {"31. PMIC定时开机", StopWatchApp::test_pmic_timer_wake},
+    {"32. PMIC定时重启", StopWatchApp::test_pmic_timer_restart},
+    {"33. AMOLED 亮度测试", StopWatchApp::test_amoled_brightness},
 };
 
 void StopWatchApp::init()
@@ -337,7 +340,28 @@ void StopWatchApp::drawMenu()
     int center_y = 233;  // 屏幕中心
     int item_h   = 30;   // 每行间距
 
-    canvas.setTextDatum(middle_left);  // 改为左对齐，方便配合弧形
+    canvas.setTextDatum(middle_left);
+
+    // 计算当前选中项的目标位置和宽度
+    int current_idx = (menu_index % (int)testList.size() + (int)testList.size()) % (int)testList.size();
+    float relative_pos = menu_index - scroll_offset;
+    target_highlight_y = center_y + (relative_pos * item_h);
+    
+    // 计算目标宽度
+    canvas.setTextSize(2);
+    int text_width = canvas.textWidth(testList[current_idx].name);
+    target_highlight_width = text_width + 40;
+    
+    // 平滑更新高亮框位置和宽度
+    highlight_y += (target_highlight_y - highlight_y) * spring_k;
+    highlight_width += (target_highlight_width - highlight_width) * spring_k;
+    
+    // 计算高亮框的 X 偏移
+    int highlight_x_offset = get_curved_offset(highlight_y - center_y);
+    int highlight_base_x = 80 + highlight_x_offset;
+    
+    // 先绘制动态移动的高亮框
+    canvas.fillRoundRect(highlight_base_x - 10, highlight_y - 20, highlight_width, 40, 8, TFT_SKYBLUE);
 
     // 渲染范围：当前索引前后 5 个
     for (int i = -6; i <= 6; i++) {
@@ -346,25 +370,23 @@ void StopWatchApp::drawMenu()
         if (idx < 0) idx += testList.size();
 
         // 这样当 menu_index 变化时，所有项会平滑移动
-        float relative_pos = (menu_index + i) - scroll_offset;
-        int y_pos          = center_y + (relative_pos * item_h);
+        float relative_pos_item = (menu_index + i) - scroll_offset;
+        int y_pos = center_y + (relative_pos_item * item_h);
 
         // 只有在屏幕范围内的才画
         if (y_pos > 70 && y_pos < 410) {
             // 计算弧形 X 偏移
             int x_offset = get_curved_offset(y_pos - center_y);
-            int base_x   = 80 + x_offset;  // 基础左边距 + 弧形偏移
+            int base_x   = 80 + x_offset;
 
             // 区分选中态和非选中态
             if (i == 0) {
-                // 选中项加个高亮框
-                canvas.fillRoundRect(base_x - 10, y_pos - 20, 300, 40, 8, TFT_SKYBLUE);
                 canvas.setTextColor(TFT_WHITE);
                 canvas.setTextSize(2);
                 canvas.drawString(testList[idx].name, base_x, y_pos);
             } else {
                 // 非选中项渐变透明（颜色变暗）
-                int alpha = 255 - (abs(i) * 30);  // 越远越暗
+                int alpha = 255 - (abs(i) * 30);
                 if (alpha < 50) alpha = 50;
                 uint16_t color = canvas.color565(alpha, alpha, alpha);
 
@@ -375,8 +397,8 @@ void StopWatchApp::drawMenu()
         }
     }
 
-    // 画一个红色的固定指示器（参考代码中的 Selector）
-    canvas.drawRoundRect(60, center_y - 25, 340, 50, 10, TFT_RED);
+    // 画一个红色的固定指示器
+    // canvas.drawRoundRect(60, center_y - 25, 340, 50, 10, TFT_RED);
 }
 
 void StopWatchApp::drawTitle(const char *title)
@@ -1575,6 +1597,11 @@ void StopWatchApp::test_bottom_io()
     canvas.drawString("右键退出", 233, 60);
     unsigned long last_time = 0;
     int idx                 = 3;  // 3-9
+    for (int i = 3; i <= 9; i++) {
+        gpio_reset_pin((gpio_num_t)i);
+        gpio_set_direction((gpio_num_t)i, GPIO_MODE_OUTPUT);
+        gpio_set_pull_mode((gpio_num_t)i, GPIO_PULLUP_ONLY);
+    }
     while (1) {
         app.updateInputs(false);
         if (app._inputs.btnRightClicked) return;
@@ -1592,22 +1619,82 @@ void StopWatchApp::test_bottom_io()
         vTaskDelay(10);
     }
 }
-
+#define UART_NUM UART_NUM_1
+#define TXD_PIN 43
+#define RXD_PIN 44
+#define BUF_SIZE 1024
 // 14. CH442E
 void StopWatchApp::test_ch442e()
 {
     app.drawTitle(testList[13].name);
-    canvas.drawString("左键切换 右键退出", 233, 60);
+    
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .rx_flow_ctrl_thresh = 122,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    
+    uart_driver_install(UART_NUM, BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(UART_NUM, &uart_config);
+    uart_set_pin(UART_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    
     int lvl = 0;
+    io_expander.digitalWrite(PY32_MUX_CTR_PIN, lvl);
+    
+    char rx_buffer[256] = {0};
+    char display_buffer[512] = {0};
+    char last_rx_data[256] = {0};
+    char last_tx_data[64] = {0};
+    int send_counter = 0;
+    
+    canvas.drawString("左键切换 触屏发送", 233, 60);
+    canvas.drawString("右键退出", 233, 90);
+    
     while (1) {
-        canvas.drawString(lvl ? " Level: HIGH " : " Level: LOW ", 233, 233);
+        canvas.fillRect(0, 120, 466, 200, TFT_BLACK);
+        
+        snprintf(display_buffer, sizeof(display_buffer), 
+                 "%s", lvl ? "Level: HIGH(USB)" : "Level: LOW (UART)");
+        canvas.drawString(display_buffer, 233, 140);
+        
+        int len = uart_read_bytes(UART_NUM, rx_buffer, sizeof(rx_buffer) - 1, 20 / portTICK_PERIOD_MS);
+        if (len > 0) {
+            rx_buffer[len] = '\0';
+            strncpy(last_rx_data, rx_buffer, sizeof(last_rx_data) - 1);
+        }
+        
+        if (strlen(last_rx_data) > 0) {
+            canvas.drawString("RX:", 233, 180);
+            canvas.drawString(last_rx_data, 233, 210);
+        }
+        
+        if (strlen(last_tx_data) > 0) {
+            canvas.drawString("TX:", 233, 250);
+            canvas.drawString(last_tx_data, 233, 280);
+        }
+        
         canvas.pushSprite(&gfx, 0, 0);
-        app.updateInputs(false);
+        app.updateInputs(true);
+        
         if (app._inputs.btnLeftClicked) {
             lvl = !lvl;
             io_expander.digitalWrite(PY32_MUX_CTR_PIN, lvl);
         }
-        if (app._inputs.btnRightClicked) return;
+        
+        if (app._inputs.touchClicked && lvl == 0) {
+            snprintf(last_tx_data, sizeof(last_tx_data), "Test data %d\r\n", send_counter++);
+            uart_write_bytes(UART_NUM, last_tx_data, strlen(last_tx_data));
+        }
+        
+        if (app._inputs.btnRightClicked) {
+            uart_driver_delete(UART_NUM);
+            return;
+        }
+        
         vTaskDelay(50);
     }
 }
@@ -1954,7 +2041,21 @@ void StopWatchApp::test_imu_shutdown_wake()
     }
     wakeup_test(WakeupDevice::IMU_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
 }
-void StopWatchApp::test_rtc_wake()
+void StopWatchApp::test_rtc_alarm_wake()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后esp32s3进入deepsleep, 1分钟后唤醒(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    wakeup_test(WakeupDevice::RTC_ALARM_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+}
+void StopWatchApp::test_rtc_time_update_wake()
 {
     char buf[64];
     canvas.setTextDatum(bottom_center);
@@ -1966,9 +2067,23 @@ void StopWatchApp::test_rtc_wake()
         canvas.pushSprite(&gfx, 0, 0);
         vTaskDelay(1000);
     }
-    wakeup_test(WakeupDevice::RTC_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
+    wakeup_test(WakeupDevice::RTC_TIME_UPDATE_WAKEUP, WakeupMode::WAKEUP_DEEPSLEEP);
 }
-void StopWatchApp::test_rtc_shutdown_wake()
+void StopWatchApp::test_rtc_alarm_shutdown_wake()
+{
+    char buf[64];
+    canvas.setTextDatum(bottom_center);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        sprintf(buf, "3秒后设备关机, 1分钟后唤醒(%d)", i + 1);
+        canvas.drawString(buf, 233, 233);
+        canvas.pushSprite(&gfx, 0, 0);
+        vTaskDelay(1000);
+    }
+    wakeup_test(WakeupDevice::RTC_ALARM_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
+}
+void StopWatchApp::test_rtc_time_update_shutdown_wake()
 {
     char buf[64];
     canvas.setTextDatum(bottom_center);
@@ -1980,7 +2095,7 @@ void StopWatchApp::test_rtc_shutdown_wake()
         canvas.pushSprite(&gfx, 0, 0);
         vTaskDelay(1000);
     }
-    wakeup_test(WakeupDevice::RTC_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
+    wakeup_test(WakeupDevice::RTC_TIME_UPDATE_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
 }
 void StopWatchApp::test_base_wake()
 {
@@ -1997,10 +2112,10 @@ void StopWatchApp::test_base_wake()
     wakeup_test(WakeupDevice::PORT_WAKEUP, WakeupMode::WAKEUP_SHUTDOWN);
 }
 
-// 17. Flash Test
+// Flash Test
 void StopWatchApp::test_flash()
 {
-    app.drawTitle(testList[16].name);
+    app.drawTitle("Flash Test");
     canvas.fillRect(0, 55, 466, 345, TFT_BLACK);
     canvas.setTextDatum(top_center);
     canvas.setTextSize(1);
@@ -2272,7 +2387,7 @@ void StopWatchApp::test_flash()
     }
 }
 
-// 22. Full Load
+// Full Load
 void StopWatchApp::test_full_load()
 {
     app.drawTitle("Full Load Mode");
@@ -2318,7 +2433,7 @@ void StopWatchApp::test_full_load()
     }
 }
 
-// 23. Aging
+// Aging
 void StopWatchApp::test_aging()
 {
     wifi_manager_init();
@@ -2389,7 +2504,7 @@ void StopWatchApp::test_pmic_timer_shutdown()
     }
 }
 
-// 29. PMIC定时开机
+// PMIC定时开机
 void StopWatchApp::test_pmic_timer_wake()
 {
     bool is_start       = false;
@@ -2433,7 +2548,7 @@ void StopWatchApp::test_pmic_timer_wake()
     }
 }
 
-// 30. PMIC定时重启
+// PMIC定时重启
 void StopWatchApp::test_pmic_timer_restart()
 {
     bool is_start       = false;
@@ -2472,7 +2587,7 @@ void StopWatchApp::test_pmic_timer_restart()
     }
 }
 
-// 31. AMOLED 亮度测试
+// AMOLED 亮度测试
 void StopWatchApp::test_amoled_brightness()
 {
     uint8_t brightness = 128;

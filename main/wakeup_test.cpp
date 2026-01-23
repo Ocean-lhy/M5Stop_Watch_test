@@ -306,7 +306,9 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
     rx8130.clearIrqFlags();
     rx8130.disableIrq();
     switch (wakeup_device) {
-        case WakeupDevice::RTC_WAKEUP: {
+        case WakeupDevice::RTC_ALARM_WAKEUP:
+        case WakeupDevice::RTC_TIME_UPDATE_WAKEUP: 
+        {
             struct tm time;
             rx8130.getTime(&time);
             ESP_LOGI(TAG, "READ RX8130-> Time: %04d-%02d-%02d %02d:%02d:%02d", time.tm_year + 1900, time.tm_mon + 1,
@@ -362,7 +364,7 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
     }
 
     // G0 RTC & IMU and G4 PORT irq MASK DISABLE
-    bool rtc_imu_irq_mask = (wakeup_device == WakeupDevice::RTC_WAKEUP || wakeup_device == WakeupDevice::IMU_WAKEUP);
+    bool rtc_imu_irq_mask = (wakeup_device == WakeupDevice::RTC_ALARM_WAKEUP || wakeup_device == WakeupDevice::RTC_TIME_UPDATE_WAKEUP || wakeup_device == WakeupDevice::IMU_WAKEUP);
     bool port_irq_mask    = (wakeup_device == WakeupDevice::PORT_WAKEUP);
     pm1_irq_set_gpio_mask(PMG0_RTC_IMU_INT, rtc_imu_irq_mask ? PM1_IRQ_MASK_DISABLE : PM1_IRQ_MASK_ENABLE);
     pm1_irq_set_gpio_mask(PMG4_PORT_INT, port_irq_mask ? PM1_IRQ_MASK_DISABLE : PM1_IRQ_MASK_ENABLE);
@@ -397,12 +399,15 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
     pm1_irq_get_status(&irq_gpio_num, PM1_ADDR_IRQ_GPIO_ALL_CLEAN);
     pm1_irq_get_btn_status(&irq_btn_num, PM1_ADDR_IRQ_BTN_ALL_CLEAN);
     pm1_irq_get_sys_status(&irq_sys_num, PM1_ADDR_IRQ_SYS_ALL_CLEAN);
-
-    if (wakeup_device == WakeupDevice::RTC_WAKEUP) {
+    
+    if (wakeup_device == WakeupDevice::RTC_ALARM_WAKEUP){
+        struct tm current_time;
+        rx8130.getTime(&current_time);
+        current_time.tm_min += 1;
+        rx8130.setAlarmIrq(&current_time);
+        ESP_LOGI(TAG, "system will deep sleep or shutdown, and it will automatically wake up within 1 minute.");
+    } else if (wakeup_device == WakeupDevice::RTC_TIME_UPDATE_WAKEUP) {
         rx8130.setTimerIrq(10);
-        if (wakeup_mode == WakeupMode::WAKEUP_SHUTDOWN) {
-            pm1_ldo_set_power_hold(true);  // hold LDO3V3 power open to keep pullup on IRQ_PIN
-        }
         ESP_LOGI(TAG, "system will deep sleep or shutdown, and it will automatically wake up within 20 seconds.");
 #if 0
         gpio_config_t io_conf = {
@@ -429,9 +434,6 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
 #endif
     } else if (wakeup_device == WakeupDevice::IMU_WAKEUP) {
         bmi270_INT_wakeup_deepsleep_test();
-        if (wakeup_mode == WakeupMode::WAKEUP_SHUTDOWN) {
-            pm1_ldo_set_power_hold(true);  // hold LDO3V3 power open to keep pullup on IRQ_PIN
-        }
         ESP_LOGI(TAG, "system will deep sleep or shutdown, and it will automatically wake up when motion is detected.");
 #if 0
         gpio_config_t io_conf = {
@@ -463,7 +465,10 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
         py32_io_expander_sleep();
         pm1_pwr_set_cfg(PM1_PWR_CFG_LED_CONTROL, 0, NULL);  // disable LED
         pm1_pwr_set_cfg(PM1_PWR_CFG_5V_INOUT, 0, NULL);
-        pm1_set_i2c_sleep_time(1);
+        if (wakeup_device != WakeupDevice::RTC_TIME_UPDATE_WAKEUP) // can't catch 7.5ms irq signal
+        {
+            pm1_set_i2c_sleep_time(1);
+        }
 
         gpio_reset_pin(IRQ_PIN);
         rtc_gpio_pullup_en(IRQ_PIN);
@@ -472,6 +477,7 @@ void wakeup_test(WakeupDevice wakeup_device, WakeupMode wakeup_mode)
         vTaskDelay(1000 / portTICK_PERIOD_MS);
         esp_deep_sleep_start();
     } else {
+        pm1_ldo_set_power_hold(true);  // hold LDO3V3 power open to keep pullup on IRQ_PIN
         pm1_sys_cmd(PM1_SYS_CMD_SHUTDOWN);
     }
 }
